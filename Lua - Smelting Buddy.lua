@@ -44,14 +44,12 @@ local LBM = ic.enums.LogicBatchMethod
 local hash = ic.hash
 local batch_read_name = ic.batch_read_name
 local batch_write_name = ic.batch_write_name
+local batch_write = ic.batch_write
 local LST = ic.enums.LogicSlotType
 local batch_read_slot_name = ic.batch_read_slot_name
 local ic = _G.ic
 local util = _G.util
 local ss = _G.ss
-
--- Global function references
-
 local roles
 local requested_recipe
 local recipe_window
@@ -71,6 +69,10 @@ local PREFABS = {
     furnace_mirrored = hash("StructureAdvancedFurnaceMirrored"),
     vend = hash("StructureVendingMachine"),
     vend_fridge = hash("StructureRefrigeratedVendingMachine"),
+    stackers = hash("StructureStacker"),
+    stackersmirror = hash("StructureStackerReverse"),
+    sorter = hash("StructureSorter"),
+    sorter2 = hash("StructureSorterMirrored"),
 }
 
 local PA_PREFABS = { PREFABS.gas_pa, PREFABS.liquid_pa }
@@ -82,6 +84,7 @@ local SILO_PREFABS = { PREFABS.silo }
 local FURNACE_PREFABS = { PREFABS.furnace, PREFABS.furnace_mirrored }
 local VEND_PREFABS = { PREFABS.vend, PREFABS.vend_fridge }
 local LOGIC_SORTER_PREFABS = { PREFABS.logic_sorter, PREFABS.logic_sorter_mirrored }
+local OTHER_PREFABS = { PREFABS.sorter, PREFABS.stackers, PREFABS.sorter2, PREFABS.stackersmirror }
 local ORE_STACK_SIZE = 50
 
 local C = {
@@ -123,6 +126,8 @@ local MEM_CONTROL_BEGIN = 80
 local MEM_MAX_TEMP_HARD = MEM_CONTROL_BEGIN + 4
 local MEM_LIVE_REFRESH = MEM_CONTROL_BEGIN + 5
 local MEM_BATCH_RUNNING = MEM_CONTROL_BEGIN + 6
+local MEM_POWER_TOGGLE = MEM_CONTROL_BEGIN + 7
+local MEM_POWER_TARGET = MEM_CONTROL_BEGIN + 8
 
 local MEM_QUEUE_COUNT = 100
 local MEM_QUEUE_START = 101
@@ -289,6 +294,14 @@ local function safe_batch_write_name(prefab, namehash, logic_type, value)
     return ok
 end
 
+local function safe_batch_write_prefab(prefab, logic_type, value)
+    if batch_write == nil then return false end
+    local p = tonumber(prefab) or 0
+    if p == 0 then return false end
+    local ok = pcall(batch_write, p, logic_type, value)
+    return ok
+end
+
 local function resolve_name_hash(namehash)
     local n = tonumber(namehash) or 0
     if n == 0 then return "Unassigned" end
@@ -420,6 +433,9 @@ local max_temp_hard = 2500
 
 local ui_max_temp_hard = tostring(max_temp_hard)
 local ui_live_refresh = tostring(LIVE_REFRESH_TICKS)
+
+local global_power_on = true
+local power_target_all = true
 
 requested_recipe = 0
 local requested_amount = 0
@@ -962,15 +978,26 @@ local function save_control_settings()
     write(MEM_MAX_TEMP_HARD, max_temp_hard)
     write(MEM_LIVE_REFRESH, LIVE_REFRESH_TICKS)
     write(MEM_BATCH_RUNNING, is_batch_running and 1 or 0)
-    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s batch_run=%s", tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(is_batch_running)))
+    write(MEM_POWER_TOGGLE, global_power_on and 2 or 1)
+    write(MEM_POWER_TARGET, power_target_all and 1 or 0)
+    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s", 
+        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all)))
 end
 
 local function load_control_settings()
     max_temp_hard = to_number_or(read(MEM_MAX_TEMP_HARD), max_temp_hard)
     LIVE_REFRESH_TICKS = to_number_or(read(MEM_LIVE_REFRESH), MIN_LIVE_REFRESH_TICKS)
     is_batch_running = (read(MEM_BATCH_RUNNING) == 1)
+    
+    local pval = tonumber(read(MEM_POWER_TOGGLE)) or 0
+    if pval > 0 then global_power_on = (pval == 2) end
+    
+    local tval = tonumber(read(MEM_POWER_TARGET)) or 1
+    power_target_all = (tval == 1)
+
     save_control_settings()
-    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s batch_run=%s", tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(is_batch_running)))
+    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s", 
+        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all)))
 end
 
 -- ==================== DEVICE LIST HELPERS ====================
@@ -1308,6 +1335,33 @@ function run_furnace_activity_monitor()
             
         end
     end
+end
+
+local function handle_power_toggle()
+    global_power_on = not global_power_on
+    local val = global_power_on and 1 or 0
+    
+    log_step("handle_power_toggle: power_on=" .. tostring(global_power_on) .. " target_all=" .. tostring(power_target_all))
+    
+    for _, role in pairs(roles) do
+        if role_is_bound(role) then
+            local is_storage = role.key:find("silo") or role.key:find("vend")
+            if power_target_all or not is_storage then
+                safe_batch_write_name(role.prefab, role.namehash, LT.On, val)
+            end
+        end
+    end
+
+    if power_target_all then
+        log_action("power_target_all is true")
+        for _, p_hash in ipairs(OTHER_PREFABS or {}) do
+            log_action("power_target_all is true - writing to prefab: " .. tostring(p_hash))
+            safe_batch_write_prefab(p_hash, LT.On, val)
+        end
+    end
+
+    save_control_settings()
+    dashboard_render(true)
 end
 
 function run_lever_pulse_logic()
@@ -2085,6 +2139,25 @@ function render_footer(surface)
         style = { font_size = 8, color = C.text_muted, align = "left" }
     })
 
+    local toggle_w = 120
+    local toggle_x = math.floor((W - toggle_w) / 2)
+    local active = global_power_on
+    handles.footer.power_toggle = footer:element({
+        id = "power_toggle",
+        type = "button",
+        rect = { unit = "px", x = toggle_x, y = 0, w = toggle_w, h = 18 },
+        props = { text = "Power Devices: " .. (active and "ON" or "OFF") },
+        style = {
+            bg = active and C.green or C.bar_bg,
+            text = active and C.bg or C.text_dim,
+            font_size = 9,
+            align = "center",
+            gradient = active and "#0f4c63" or "#182133",
+            gradient_dir = "vertical"
+        },
+        on_click = handle_power_toggle
+    })
+
     handles.footer.right = footer:element({
         id = "footer_right",
         type = "label",
@@ -2098,13 +2171,22 @@ function update_footer_dynamic()
     if handles.footer.left ~= nil then
         handles.footer.left:set_props({ text = "Time: " .. currenttime2 })
     end
+    if handles.footer.power_toggle ~= nil then
+        local active = global_power_on
+        handles.footer.power_toggle:set_props({ text = "Power Devices: " .. (active and "ON" or "OFF") })
+        handles.footer.power_toggle:set_style({
+            bg = active and C.green or C.bar_bg,
+            text = active and C.bg or C.text_dim,
+            gradient = active and "#0f4c63" or "#182133"
+        })
+    end
     if handles.footer.right ~= nil then
         handles.footer.right:set_props({ text = string.format("Tick %.0f | Refresh %dt", math.floor(elapsed), LIVE_REFRESH_TICKS) })
     end
 end
 
 function render_overview(surface)
-
+    local ui_vis = global_power_on
     local left_col_x = 8
     local left_col_w = 220
 
@@ -2116,6 +2198,7 @@ function render_overview(surface)
         id = "selector_bg",
         type = "panel",
         rect = { unit = "px", x = left_col_x, y = 60, w = left_col_w, h = H - 82 },
+        props = { visible = ui_vis },
         style = { bg = C.panel }
     })
 
@@ -2126,8 +2209,18 @@ function render_overview(surface)
             id = "selector_icon",
             type = "icon",
             rect = { unit = "px", x = center_x(96), y = 70, w = 96, h = 96 },
-            props = { name = tostring(entry[2]), icon_type = "prefab" },
+            props = { name = tostring(entry[2]), icon_type = "prefab", visible = ui_vis },
             style = { tint = "#FFFFFF" },
+        })
+    end
+
+    if not global_power_on then
+        handles.overview.power_warning = s:element({
+            id = "power_warning",
+            type = "label",
+            rect = { unit = "px", x = center_x(300) + 110, y = 200, w = 300, h = 40 },
+            props = { text = "WARNING: TURN ON POWER FIRST" },
+            style = { color = C.red, font_size = 14, align = "center", font_weight = "bold" }
         })
     end
     if handles.overview.ingot_name == nil then
@@ -2135,7 +2228,7 @@ function render_overview(surface)
             id = "selector_name",
             type = "label",
             rect = { unit = "px", x = center_x(206), y = 170, w = 206, h = 22 },
-            props = { text = entry[1] },
+            props = { text = entry[1], visible = ui_vis },
             style = { color = C.text, font_size = 14, align = "center" },
         })
     end
@@ -2144,7 +2237,7 @@ function render_overview(surface)
             id = "selector_counter",
             type = "label",
             rect = { unit = "px", x = center_x(206), y = 190, w = 206, h = 16 },
-            props = { text = string.format("%d / %d", selected_ingot_index, totalIngots) },
+            props = { text = string.format("%d / %d", selected_ingot_index, totalIngots), visible = ui_vis },
             style = { color = C.text_dim, font_size = 10, align = "center" },
         })
     end
@@ -2154,7 +2247,7 @@ function render_overview(surface)
         id = "selector_prev",
         type = "button",
         rect = { unit = "px", x = center_x(2 * btn_w + 20), y = 210, w = btn_w, h = 18 },
-        props = { text = "<" },
+        props = { text = "<", visible = ui_vis },
         style = { bg = C.panel_light, text = C.text, font_size = 10 },
         on_click = function()
             selected_ingot_index = ((selected_ingot_index - 2) % totalIngots) + 1
@@ -2166,7 +2259,7 @@ function render_overview(surface)
         id = "selector_next",
         type = "button",
         rect = { unit = "px", x = center_x(2 * btn_w + 20) + btn_w + 20, y = 210, w = btn_w, h = 18 },
-        props = { text = ">" },
+        props = { text = ">", visible = ui_vis },
         style = { bg = C.panel_light, text = C.text, font_size = 10 },
         on_click = function()
             selected_ingot_index = (selected_ingot_index % totalIngots) + 1
@@ -2179,28 +2272,28 @@ function render_overview(surface)
         id = "preview_label",
         type = "label",
         rect = { unit = "px", x = center_x(178), y = 230, w = 178, h = 12 },
-        props = { text = materials_preview_title() },
+        props = { text = materials_preview_title(), visible = ui_vis },
         style = { color = C.text_dim, font_size = 8, align = "center" },
     })
     handles.overview.preview_1 = s:element({
         id = "preview_1",
         type = "label",
         rect = { unit = "px", x = center_x(178), y = 245, w = 178, h = 12 },
-        props = { text = preview[1] },
+        props = { text = preview[1], visible = ui_vis },
         style = { color = C.text, font_size = 8, align = "center" },
     })
     handles.overview.preview_2 = s:element({
         id = "preview_2",
         type = "label",
         rect = { unit = "px", x = center_x(178), y = 260, w = 178, h = 12 },
-        props = { text = preview[2] },
+        props = { text = preview[2], visible = ui_vis },
         style = { color = C.text, font_size = 8, align = "center" },
     })
     handles.overview.preview_3 = s:element({
         id = "preview_3",
         type = "label",
         rect = { unit = "px", x = center_x(178), y = 275, w = 178, h = 12 },
-        props = { text = preview[3] },
+        props = { text = preview[3], visible = ui_vis },
         style = { color = C.text, font_size = 8, align = "center" },
     })
 
@@ -2213,7 +2306,7 @@ function render_overview(surface)
         id = "batch_label",
         type = "label",
         rect = { unit = "px", x = batch_x + 20, y = 290, w = batch_label_w, h = 14 },
-        props = { text = "Batches" },
+        props = { text = "Batches", visible = ui_vis },
         style = { color = C.text_dim, font_size = 9, align = "left" },
     })
     if handles.overview.batch_value == nil then
@@ -2221,7 +2314,7 @@ function render_overview(surface)
             id = "batch_value",
             type = "label",
             rect = { unit = "px", x = batch_x + batch_label_w, y = 290, w = batch_value_w, h = 14 },
-            props = { text = tostring(requested_amount) },
+            props = { text = tostring(requested_amount), visible = ui_vis },
             style = { color = C.text, font_size = 10, align = "center" },
         })
     end
@@ -2229,7 +2322,7 @@ function render_overview(surface)
         id = "batch_dec",
         type = "button",
         rect = { unit = "px", x = batch_x + batch_label_w + batch_value_w, y = 290, w = batch_btn_w, h = 18 },
-        props = { text = "-" },
+        props = { text = "-", visible = ui_vis },
         style = { bg = C.panel_light, text = C.text, font_size = 10 },
         on_click = function()
             requested_amount = clamp(requested_amount - 1, MIN_BATCH_AMOUNT, MAX_BATCH_AMOUNT)
@@ -2240,7 +2333,7 @@ function render_overview(surface)
         id = "batch_inc",
         type = "button",
         rect = { unit = "px", x = batch_x + batch_label_w + batch_value_w + batch_btn_w + 4, y = 290, w = batch_btn_w, h = 18 },
-        props = { text = "+" },
+        props = { text = "+", visible = ui_vis },
         style = { bg = C.panel_light, text = C.text, font_size = 10 },
         on_click = function()
             requested_amount = clamp(requested_amount + 1, MIN_BATCH_AMOUNT, MAX_BATCH_AMOUNT)
@@ -2256,7 +2349,7 @@ function render_overview(surface)
         id = "output_label",
         type = "label",
         rect = { unit = "px", x = output_x + 20, y = 310, w = output_label_w, h = 14 },
-        props = { text = "Output Ingots" },
+        props = { text = "Output Ingots", visible = ui_vis },
         style = { color = C.text_dim, font_size = 9, align = "left" },
     })
     if handles.overview.output_value == nil then
@@ -2264,7 +2357,7 @@ function render_overview(surface)
             id = "output_value",
             type = "label",
             rect = { unit = "px", x = output_x + output_label_w, y = 310, w = output_value_w, h = 14 },
-            props = { text = tostring(selected_output_amount()) },
+            props = { text = tostring(selected_output_amount()), visible = ui_vis },
             style = { color = C.accent, font_size = 10, align = "left" },
         })
     end
@@ -2289,7 +2382,7 @@ function render_overview(surface)
         id = "start_button",
         type = "button",
         rect = { unit = "px", x = center_x(start_btn_w), y = 330, w = start_btn_w, h = 22 },
-        props = { text = start_label },
+        props = { text = start_label, visible = ui_vis },
         style = {
             bg = start_bg,
             text = start_text,
@@ -2315,7 +2408,7 @@ function render_overview(surface)
         id = "fuel_press_label",
         type = "label",
         rect = { unit = "px", x = press_x, y = 355, w = press_label_w, h = 12 },
-        props = { text = "Fuel Press" },
+        props = { text = "Fuel Press", visible = ui_vis },
         style = { color = C.text_dim, font_size = 8, align = "left" },
     })
     if handles.overview.fuel_press_value == nil then
@@ -2323,7 +2416,7 @@ function render_overview(surface)
             id = "fuel_press_value",
             type = "label",
             rect = { unit = "px", x = press_x + press_label_w, y = 355, w = press_value_w, h = 12 },
-            props = { text = fmt(readings.fuel_pa_press, 1) .. " kPa" },
+            props = { text = fmt(readings.fuel_pa_press, 1) .. " kPa", visible = ui_vis },
             style = { color = C.text, font_size = 8, align = "left" },
         })
     end
@@ -2331,7 +2424,7 @@ function render_overview(surface)
         id = "coolant_press_label",
         type = "label",
         rect = { unit = "px", x = press_x, y = 370, w = press_label_w, h = 12 },
-        props = { text = "Coolant Press" },
+        props = { text = "Coolant Press", visible = ui_vis },
         style = { color = C.text_dim, font_size = 8, align = "left" },
     })
     if handles.overview.coolant_press_value == nil then
@@ -2339,7 +2432,7 @@ function render_overview(surface)
             id = "coolant_press_value",
             type = "label",
             rect = { unit = "px", x = press_x + press_label_w, y = 370, w = press_value_w, h = 12 },
-            props = { text = fmt(readings.coolant_pa_press, 1) .. " kPa" },
+            props = { text = fmt(readings.coolant_pa_press, 1) .. " kPa", visible = ui_vis },
             style = { color = C.text, font_size = 8, align = "left" },
         })
     end
@@ -2349,6 +2442,7 @@ function render_overview(surface)
         id = "overview_stats_bg",
         type = "panel",
         rect = { unit = "px", x = 232, y = 60, w = W - 240, h = H - 82 },
+        props = { visible = ui_vis },
         style = { bg = C.panel }
     })
 
@@ -2364,14 +2458,14 @@ function render_overview(surface)
             id = id .. "_label",
             type = "label",
             rect = { unit = "px", x = x0, y = y, w = stat_label_w, h = 14 },
-            props = { text = label },
+            props = { text = label, visible = ui_vis },
             style = { font_size = 9, color = label_color, align = "left" }
         })
         handles.overview[id] = s:element({
             id = id .. "_value",
             type = "label",
             rect = { unit = "px", x = x0 + stat_gap, y = y, w = 120, h = 14 },
-            props = { text = value },
+            props = { text = value, visible = ui_vis },
             style = { font_size = 9, color = color or C.text, align = "left" }
         })
     end
@@ -2396,31 +2490,33 @@ function render_overview(surface)
     local chute_btn_y = left_col_bottom_y - 20
     local flush_btn_y = left_col_bottom_y + 20
     if _G.steel_output_to_vend == nil then _G.steel_output_to_vend = false end
-    handles.overview["ov_chute_toggle_btn"] = s:element({
-        id = "ov_chute_toggle_btn",
-        type = "button",
-        rect = { unit = "px", x = left_col_x + 7, y = chute_btn_y + 10, w = left_col_w, h = 18 },
-        props = { text = "Steel Output" },
-        style = {
-            bg = C.panel_light,
-            text = C.text,
-            font_size = 10,
-            gradient = "#182133",
-            gradient_dir = "vertical"
-        },
-        on_click = function()
-            _G.steel_output_to_vend = not _G.steel_output_to_vend
-            set_chute_valve_open(_G.steel_output_to_vend)
-            dashboard_render(false)
-        end
-    })
+    if handles.overview["ov_chute_toggle_btn"] == nil then
+        handles.overview["ov_chute_toggle_btn"] = s:element({
+            id = "ov_chute_toggle_btn",
+            type = "button",
+            rect = { unit = "px", x = left_col_x + 7, y = chute_btn_y + 10, w = left_col_w, h = 18 },
+            props = { text = "Steel Output", visible = ui_vis },
+            style = {
+                bg = C.panel_light,
+                text = C.text,
+                font_size = 10,
+                gradient = "#182133",
+                gradient_dir = "vertical"
+            },
+            on_click = function()
+                _G.steel_output_to_vend = not _G.steel_output_to_vend
+                set_chute_valve_open(_G.steel_output_to_vend)
+                dashboard_render(false)
+            end
+        })
+    end
 
     local function overview_toggle_button(id, x, y, w, label, active, on_click)
         handles.overview[id] = s:element({
             id = id,
             type = "button",
             rect = { unit = "px", x = x, y = y, w = w, h = 18 },
-            props = { text = string.format("%s: %s", label, active and "ON" or "OFF") },
+            props = { text = string.format("%s: %s", label, active and "ON" or "OFF"), visible = ui_vis },
             style = {
                 bg = active and C.accent or C.panel_light,
                 text = active and C.bg or C.text,
@@ -2445,7 +2541,7 @@ function render_overview(surface)
         id = "silo_totals_title",
         type = "label",
         rect = { unit = "px", x = x0 - 44, y = 240, w = 234, h = 12 },
-        props = { text = "Silo: Ore Quantity" },
+        props = { text = "Silo: Ore Quantity", visible = ui_vis },
         style = { font_size = 8, color = "#7bbcc6", align = "center" }
     })
 
@@ -2463,7 +2559,7 @@ function render_overview(surface)
             id = key .. "_label",
             type = "label",
             rect = { unit = "px", x = col_x + 44, y = y, w = 58, h = 9 },
-            props = { text = mat },
+            props = { text = mat, visible = ui_vis },
             style = { font_size = 8, color = C.text_dim, align = "left" }
         })
 
@@ -2472,34 +2568,40 @@ function render_overview(surface)
                 id = key .. "_value",
                 type = "label",
                 rect = { unit = "px", x = col_x + 78, y = y, w = 54, h = 9 },
-                props = { text = fmt(ore_amount, 0) },
+                props = { text = fmt(ore_amount, 0), visible = ui_vis },
                 style = { font_size = 8, color = stock_amount_color(ore_amount), align = "left" }
             })
         end
     end
-    s:element({
-        id = "vend_title",
-        type = "label",
-        rect = { unit = "px", x = x0 + 50, y = 240, w = 234, h = 12 },
-        props = { text = "Vend Inventory" },
-        style = { font_size = 8, color = "#7bbcc6", align = "center" }
-    })
+    if handles.overview.vend_title == nil then
+        handles.overview.vend_title = s:element({
+            id = "vend_title",
+            type = "label",
+            rect = { unit = "px", x = x0 + 50, y = 240, w = 234, h = 12 },
+            props = { text = "Vend Inventory", visible = ui_vis },
+            style = { font_size = 8, color = "#7bbcc6", align = "center" }
+        })
+    end
 
-    s:element({
-        id = "vend_free_normal_label",
-        type = "label",
-        rect = { unit = "px", x = x0 + 127, y = 255, w = 58, h = 9 },
-        props = { text = "Slots: Normal" },
-        style = { font_size = 8, color = C.text_dim, align = "right" }
-    })
+    if handles.overview.vend_free_normal_label == nil then
+        handles.overview.vend_free_normal_label = s:element({
+            id = "vend_free_normal_label",
+            type = "label",
+            rect = { unit = "px", x = x0 + 127, y = 255, w = 58, h = 9 },
+            props = { text = "Slots: Normal", visible = ui_vis },
+            style = { font_size = 8, color = C.text_dim, align = "right" }
+        })
+    end
 
-    s:element({
-        id = "vend_free_special_label",
-        type = "label",
-        rect = { unit = "px", x = x0 + 127, y = 265, w = 58, h = 9 },
-        props = { text = "Slots: Special" },
-        style = { font_size = 8, color = C.text_dim, align = "right" }
-    })
+    if handles.overview.vend_free_special_label == nil then
+        handles.overview.vend_free_special_label = s:element({
+            id = "vend_free_special_label",
+            type = "label",
+            rect = { unit = "px", x = x0 + 127, y = 265, w = 58, h = 9 },
+            props = { text = "Slots: Special", visible = ui_vis },
+            style = { font_size = 8, color = C.text_dim, align = "right" }
+        })
+    end
 
     local nf = readings.vend_normal_free
     local af = readings.vend_alloy_free
@@ -2508,7 +2610,7 @@ function render_overview(surface)
             id = "vend_free_normal_value",
             type = "label",
             rect = { unit = "px", x = x0 + 187, y = 255, w = 54, h = 9 },
-            props = { text = nf ~= nil and tostring(nf) or "--" },
+            props = { text = nf ~= nil and tostring(nf) or "--", visible = ui_vis },
             style = { font_size = 8, color = vend_free_slots_color(nf), align = "left" }
         })
     end
@@ -2517,7 +2619,7 @@ function render_overview(surface)
             id = "vend_free_special_value",
             type = "label",
             rect = { unit = "px", x = x0 + 187, y = 265, w = 54, h = 9 },
-            props = { text = af ~= nil and tostring(af) or "--" },
+            props = { text = af ~= nil and tostring(af) or "--", visible = ui_vis },
             style = { font_size = 8, color = vend_free_slots_color(af), align = "left" }
         })
     end
@@ -2535,20 +2637,22 @@ function render_overview(surface)
         local qty = ingot_hash and (readings.vend_ingot_totals[ingot_hash] or 0) or 0
         local vkey = "ov_vend_ingot_" .. i
 
-        s:element({
-            id = vkey .. "_label",
-            type = "label",
-            rect = { unit = "px", x = col_x + 15, y = vy, w = 58, h = 9 },
-            props = { text = ingot_name },
-            style = { font_size = 8, color = C.text_dim, align = "left" }
-        })
+        if handles.overview[vkey .. "_label"] == nil then
+            handles.overview[vkey .. "_label"] = s:element({
+                id = vkey .. "_label",
+                type = "label",
+                rect = { unit = "px", x = col_x + 15, y = vy, w = 58, h = 9 },
+                props = { text = ingot_name, visible = ui_vis },
+                style = { font_size = 8, color = C.text_dim, align = "left" }
+            })
+        end
 
         if handles.overview[vkey] == nil then
             handles.overview[vkey] = s:element({
                 id = vkey .. "_value",
                 type = "label",
                 rect = { unit = "px", x = col_x + 65, y = vy, w = 54, h = 9 },
-                props = { text = tostring(qty) },
+                props = { text = tostring(qty), visible = ui_vis },
                 style = { font_size = 8, color = stock_amount_color(qty), align = "left" }
             })
         end
@@ -2740,6 +2844,23 @@ function update_overview_dynamic()
             vh:set_style({ font_size = 8, color = stock_amount_color(qty), align = "left" })
         end
     end
+
+    local vend_active = role_is_bound(roles.vend_normal) or role_is_bound(roles.vend_alloy)
+    local v_props = { visible = vend_active }
+
+    if handles.overview.vend_title then handles.overview.vend_title:set_props(v_props) end
+    if handles.overview.vend_free_normal_label then handles.overview.vend_free_normal_label:set_props(v_props) end
+    if handles.overview.ov_vend_free_normal then handles.overview.ov_vend_free_normal:set_props(v_props) end
+    if handles.overview.vend_free_special_label then handles.overview.vend_free_special_label:set_props(v_props) end
+    if handles.overview.ov_vend_free_special then handles.overview.ov_vend_free_special:set_props(v_props) end
+
+    for i = 1, #ingots do
+        local vkey = "ov_vend_ingot_" .. i
+        if handles.overview[vkey .. "_label"] then handles.overview[vkey .. "_label"]:set_props(v_props) end
+        if handles.overview[vkey] then handles.overview[vkey]:set_props(v_props) end
+    end
+
+    if handles.overview["ov_chute_toggle_btn"] then handles.overview["ov_chute_toggle_btn"]:set_props(v_props) end
 end
 
 function update_settings_dynamic()
@@ -2896,6 +3017,28 @@ function render_settings(surface)
         LIVE_REFRESH_TICKS = to_number_or(v, LIVE_REFRESH_TICKS)
         save_control_settings()
     end)
+    
+    y = y + 24
+    local label = power_target_all and "All Devices" or "Smelting Devices Only"
+    s:element({
+        id = "row_power_target_lbl",
+        type = "label",
+        rect = { unit = "px", x = panel_x + 18, y = y + 2, w = 150, h = 14 },
+        props = { text = "Power Target" },
+        style = { font_size = 9, color = C.text, align = "left" }
+    })
+    s:element({
+        id = "row_power_target_btn",
+        type = "button",
+        rect = { unit = "px", x = panel_x + 212, y = y, w = 240, h = 18 },
+        props = { text = label },
+        style = { bg = C.panel_light, text = C.text, font_size = 9, gradient = "#292929ff", gradient_dir = "vertical" },
+        on_click = function()
+            power_target_all = not power_target_all
+            save_control_settings()
+            dashboard_render(true)
+        end
+    })
 end
 
 -- ==================== RENDER ENTRY ====================
@@ -2981,6 +3124,8 @@ function serialize()
         vent_enabled = vent_enabled,
         smelting_queue = smelting_queue,
         is_batch_running = is_batch_running,
+        global_power_on = global_power_on,
+        power_target_all = power_target_all,
     }
     local ok, json = pcall(util.json.encode, state)
     if not ok then return nil end
@@ -3005,6 +3150,8 @@ function deserialize(blob)
     vent_enabled = decoded.vent_enabled and true or false
     if type(decoded.smelting_queue) == "table" then smelting_queue = decoded.smelting_queue end
     is_batch_running = (decoded.is_batch_running == true)
+    if decoded.global_power_on ~= nil then global_power_on = (decoded.global_power_on == true) end
+    if decoded.power_target_all ~= nil then power_target_all = (decoded.power_target_all == true) end
     normalize_settings_subtab()
     sync_selected_recipe()
     log_step("deserialize: applied saved state")
@@ -3042,6 +3189,38 @@ last_activity_export = readings.furnace_export_count or 0
 furnace_stuck_ticks = 0
 
 update_vending_readings()
+
+if not global_power_on then
+    log_step("boot: global power is OFF - silencing devices")
+    for _, role in pairs(roles) do
+        if role_is_bound(role) then
+            local is_storage = role.key:find("silo") or role.key:find("vend")
+            if power_target_all or not is_storage then
+                safe_batch_write_name(role.prefab, role.namehash, LT.On, 0)
+            end
+        end
+    end
+    if power_target_all then
+        for _, p_hash in ipairs(OTHER_PREFABS or {}) do
+            safe_batch_write_prefab(p_hash, LT.On, 0)
+        end
+    end
+else
+    log_step("boot: global power is ON - ensuring devices are active")
+    for _, role in pairs(roles) do
+        if role_is_bound(role) then
+            local is_storage = role.key:find("silo") or role.key:find("vend")
+            if power_target_all or not is_storage then
+                safe_batch_write_name(role.prefab, role.namehash, LT.On, 1)
+            end
+        end
+    end
+    if power_target_all then
+        for _, p_hash in ipairs(OTHER_PREFABS or {}) do
+            safe_batch_write_prefab(p_hash, LT.On, 1)
+        end
+    end
+end
 log_step("boot: initialization complete")
 safe_call("boot set_view", function()
     set_view(view)
