@@ -50,8 +50,7 @@ local ic = _G.ic
 local util = _G.util
 local ss = _G.ss
 
-local dashboard_render
-local set_view
+-- Global function references
 
 local roles
 local requested_recipe
@@ -105,7 +104,7 @@ local C = {
     title = "#0a71d8ff",
 }
 
-local function pressure_color(v)
+function pressure_color(v)
     if v == nil then return C.text end
     if v < 100 then return C.red end
     if v < 200 then return C.orange end
@@ -123,6 +122,10 @@ local MEM_CONTROL_BEGIN = 80
 
 local MEM_MAX_TEMP_HARD = MEM_CONTROL_BEGIN + 4
 local MEM_LIVE_REFRESH = MEM_CONTROL_BEGIN + 5
+local MEM_BATCH_RUNNING = MEM_CONTROL_BEGIN + 6
+
+local MEM_QUEUE_COUNT = 100
+local MEM_QUEUE_START = 101
 
 -- =============== Logs & util functions ===============
 local DEBUG_LOG_ENABLED = true
@@ -130,7 +133,7 @@ local DEBUG_LOG_UI = false
 local debug_seq = 0
 local gt, gtH, gtM, gtS = 0, 0, 0, 0
 
-local function time()
+function time()
     gt = util.game_time() or 0
     gtH = math.floor(gt / 3600)
     gtM = math.floor((gt % 3600) / 60)
@@ -138,23 +141,23 @@ local function time()
     return gtH, gtM, gtS
 end
 
-local function log_action(message)
+function log_action(message)
     if not DEBUG_LOG_ENABLED then return end
     time()
     debug_seq = debug_seq + 1
     print("[SmeltingBuddy] #" .. tostring(debug_seq) .. " H" .. gtH .. " : M" .. gtM .. " : S" .. gtS .. " | " .. tostring(message))
 end
 
-local function log_step(message)
+function log_step(message)
     log_action("[STEP] " .. tostring(message))
 end
 
-local function log_ui(message)
+function log_ui(message)
     if not DEBUG_LOG_UI then return end
     log_action("[UI] " .. tostring(message))
 end
 
-local function safe_call(label, fn)
+function safe_call(label, fn)
     local ok, err = pcall(fn)
     if not ok then
         log_action("[ERROR] " .. tostring(label) .. " | " .. tostring(err))
@@ -164,25 +167,25 @@ end
 
 -- ==================== HELPERS ====================
 
-local function write(address, value)
+function write(address, value)
     mem_write(address, value)
 end
 
-local function read(address)
+function read(address)
     return mem_read(address) or 0
 end
 
-local function fmt(v, d)
+function fmt(v, d)
     if v == nil then return "--" end
     return string.format("%." .. tostring(d or 1) .. "f", v)
 end
 
-local function kelvin_to_celsius(v)
+function kelvin_to_celsius(v)
     if v == nil then return nil end
     return v - 273.15
 end
 
-local function room_pressure_color(v)
+function room_pressure_color(v)
     if v == nil then return C.text end
     if v <= 15000 then return C.green end
     if v <= 30000 then return C.yellow end
@@ -190,7 +193,7 @@ local function room_pressure_color(v)
     return C.red
 end
 
-local function room_temp_color(v)
+function room_temp_color(v)
     local c = kelvin_to_celsius(v)
     if c == nil then return C.text end
     if c > 60 then return C.red end
@@ -430,11 +433,23 @@ local vent_enabled = false
 local last_vent_enabled = false
 local vent_pulse_state = 0 -- 0:Idle, 1:AutoExtract, 2:AutoFill, 3:ManualFill
 local vent_pulse_start = 0
+local is_recovery_active = false
+local recovery_timer = 0
+local recovery_phase = 0
+local recovery_last_reagents = 0
+local lever_pulse_remaining = 0
+local lever_pulse_timer = 0
+local waiting_for_export_clear = 0
+local furnace_stuck_ticks = 0
+local last_activity_reagents = 0
+local last_activity_import = 0
+local last_activity_export = 0
 local flush_enabled = false
 local status_text = "Idle"
 local status_color = C.text_dim
 local selected_ingot_index = 1
 local last_status_text = ""
+local furnace_ignition_ticks = 0
 
 local MIN_BATCH_AMOUNT = 1
 local MAX_BATCH_AMOUNT = 50
@@ -462,8 +477,9 @@ local readings = {
     furnace_reagents = nil,
     furnace_recipe_hash = nil,
     furnace_open = nil,
+    furnace_export_count = nil,
+    furnace_import_count = nil,
     fuel_pa_press = nil,
-    fuel_pa_temp = nil,
     fuel_pa_moles = nil,
     fuel_pa_vol = nil,
     coolant_pa_press = nil,
@@ -474,6 +490,7 @@ local readings = {
     room_temp = nil,
     o2_pa_press = nil,
     ch4_pa_press = nil,
+    furnace_export_count = nil,
     vend_normal_free = nil,
     vend_alloy_free = nil,
     vend_ingot_totals = {},
@@ -602,16 +619,16 @@ local recipe_requirements = {
     [5] = { Silver = 1 },
     [6] = { Lead = 1 },
     [7] = { Nickel = 1 },
-    [8] = { Iron = 3, Coal = 1 },           -- Steel (200g yield)
-    [9] = { Iron = 0.5, Nickel = 0.5 },         -- Invar (100g yield)
-    [10] = { Iron = 0.5, Lead = 0.5 },          -- Solder (100g yield)
-    [11] = { Gold = 0.5, Silver = 0.5 },        -- Electrum (100g yield)
-    [12] = { Copper = 0.5, Nickel = 0.5 },       -- Constantan (100g yield)
-    [13] = { Nickel = 1, Silver = 1, Lead = 2 }, -- Waspaloy (50g yield from 200 reagents)
-    [14] = { Gold = 2, Steel = 1, Nickel = 1 },  -- Inconel (50g yield from 200 reagents)
-    [15] = { Copper = 1, Cobalt = 1, Steel = 2 }, -- Astroloy (50g yield from 1:1:2)
-    [16] = { Silver = 2, Nickel = 1, Cobalt = 1 }, -- Hastelloy (50g yield from 2:1:1)
-    [17] = { Silicon = 2, Cobalt = 1, Silver = 1 }, -- Stellite (50g yield from 2:1:1)
+    [8] = { Iron = 3, Coal = 1 }, 
+    [9] = { Iron = 0.5, Nickel = 0.5 },  
+    [10] = { Iron = 0.5, Lead = 0.5 },  
+    [11] = { Gold = 0.5, Silver = 0.5 }, 
+    [12] = { Copper = 0.5, Nickel = 0.5 }, 
+    [13] = { Nickel = 1, Silver = 1, Lead = 2 }, 
+    [14] = { Gold = 2, Steel = 1, Nickel = 1 },  
+    [15] = { Copper = 1, Cobalt = 1, Steel = 2 }, 
+    [16] = { Silver = 2, Nickel = 1, Cobalt = 1 },
+    [17] = { Silicon = 2, Cobalt = 1, Silver = 1 },
 }
 
 local recipe_windows = {
@@ -645,15 +662,14 @@ end
 local function recipe_amount_scale(recipe_id)
     if recipe_id <= 0 then return 0 end
     if recipe_id <= 7 then return 50 end
-    if recipe_id == 8 then return 200 end -- Steel produces 200
-    if recipe_id >= 13 then return 50 end -- Alloys with 4 parts (Waspaloy, Inconel etc) produce 50
-    if recipe_id >= 9 then return 100 end -- 1:1 Alloys (Invar, etc) produce 100
+    if recipe_id == 8 then return 200 end
+    if recipe_id >= 13 then return 50 end 
+    if recipe_id >= 9 then return 100 end
     return 50
 end
 
 local function recipe_target_reagents(recipe_id, amount)
-    -- This checks current furnace reagents against target.
-    -- For alloys, we need the SUM of required ingredients * amount.
+
     local req = recipe_requirements[recipe_id]
      if not req then return amount * 50 end
     local sum = 0
@@ -667,7 +683,7 @@ local function selected_ingot_entry()
     return ingots[selected_ingot_index] or ingots[1]
 end
 
-local function sync_selected_recipe()
+function sync_selected_recipe()
     local entry = selected_ingot_entry()
     requested_recipe = tonumber(entry and entry[3]) or 1
     requested_hash = recipe_hashes[requested_recipe] or 0
@@ -924,6 +940,7 @@ local function start_selected_recipe()
 
     furnace_run_active = true
     furnace_start_tick = currenttime
+    furnace_ignition_ticks = 25
     has_seen_reagents = false
     recipe_ready = false
     queue_silo_requests(requested_recipe, requested_amount)
@@ -944,14 +961,16 @@ local function save_control_settings()
     validate_control_settings()
     write(MEM_MAX_TEMP_HARD, max_temp_hard)
     write(MEM_LIVE_REFRESH, LIVE_REFRESH_TICKS)
-    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s", tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS)))
+    write(MEM_BATCH_RUNNING, is_batch_running and 1 or 0)
+    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s batch_run=%s", tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(is_batch_running)))
 end
 
 local function load_control_settings()
     max_temp_hard = to_number_or(read(MEM_MAX_TEMP_HARD), max_temp_hard)
     LIVE_REFRESH_TICKS = to_number_or(read(MEM_LIVE_REFRESH), MIN_LIVE_REFRESH_TICKS)
+    is_batch_running = (read(MEM_BATCH_RUNNING) == 1)
     save_control_settings()
-    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s", tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS)))
+    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s batch_run=%s", tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(is_batch_running)))
 end
 
 -- ==================== DEVICE LIST HELPERS ====================
@@ -1001,6 +1020,8 @@ local function update_readings()
     readings.furnace_reagents = safe_batch_read_name(furnace.prefab, furnace.namehash, LT.Reagents, LBM.Average)
     readings.furnace_recipe_hash = safe_batch_read_name(furnace.prefab, furnace.namehash, LT.RecipeHash, LBM.Average)
     readings.furnace_open = safe_batch_read_name(furnace.prefab, furnace.namehash, LT.Open, LBM.Average)
+    readings.furnace_export_count = safe_batch_read_name(furnace.prefab, furnace.namehash, LT.ExportCount, LBM.Average)
+    readings.furnace_import_count = safe_batch_read_name(furnace.prefab, furnace.namehash, LT.ImportCount, LBM.Average)
 
     readings.fuel_pa_press = safe_batch_read_name(fuel_pa.prefab, fuel_pa.namehash, LT.Pressure, LBM.Average)
     readings.fuel_pa_temp = safe_batch_read_name(fuel_pa.prefab, fuel_pa.namehash, LT.Temperature, LBM.Average)
@@ -1072,8 +1093,36 @@ local function validate_queue_stock()
     return all_ok, missing
 end
 
+function save_smelting_queue()
+    local count = #smelting_queue
+    write(MEM_QUEUE_COUNT, count)
+    for i = 1, math.min(count, 50) do
+        local item = smelting_queue[i]
+        local base = MEM_QUEUE_START + (i - 1) * 2
+        write(base, item.recipe_id or 0)
+        write(base + 1, item.amount or 0)
+    end
+    log_step("save_smelting_queue: saved " .. tostring(count) .. " items")
+end
 
-local function set_status_visuals()
+function load_smelting_queue()
+    local count = tonumber(read(MEM_QUEUE_COUNT)) or 0
+    smelting_queue = {}
+    if count > 0 then
+        for i = 1, math.min(count, 50) do
+            local base = MEM_QUEUE_START + (i - 1) * 2
+            local recipe_id = tonumber(read(base)) or 0
+            local amount = tonumber(read(base + 1)) or 0
+            if recipe_id > 0 then
+                table.insert(smelting_queue, { recipe_id = recipe_id, amount = amount })
+            end
+        end
+    end
+    log_step("load_smelting_queue: loaded " .. tostring(#smelting_queue) .. " items")
+end
+
+
+function set_status_visuals()
     local function commit_status_log()
         if status_text ~= last_status_text then
             log_step("set_status_visuals: status changed to '" .. tostring(status_text) .. "'")
@@ -1120,8 +1169,167 @@ local function set_status_visuals()
     commit_status_log()
 end
 
+function run_recovery_logic(tick_count)
+    if not is_recovery_active or not is_batch_running then return end
 
--- Mixer correction state: nil = not correcting, "up" = adding O2, "down" = removing O2
+    local furnace = roles.furnace
+    if not role_is_bound(furnace) then
+        is_recovery_active = false
+        return
+    end
+
+    if recovery_timer > 0 then
+        recovery_timer = recovery_timer - 1
+        status_text = "Failsafe Wait (" .. tostring(recovery_timer) .. ")"
+        status_color = C.orange
+        return
+    end
+
+    local exp = readings.furnace_export_count or 0
+    local rgn = readings.furnace_reagents or 0
+    local target = recipe_target_reagents(requested_recipe, requested_amount)
+
+    log_step(string.format("run_recovery_logic: phase=%d exp=%s reagents=%s target=%s", recovery_phase, tostring(exp), tostring(rgn), tostring(target)))
+
+
+    if lever_pulse_remaining > 0 then
+        return
+    end
+
+    if recovery_phase == 0 then
+
+        if exp > 0 then
+            log_step("recovery: items exported - clearing memory and moving to next")
+            safe_batch_write_name(furnace.prefab, furnace.namehash, LT.ClearMemory, 1)
+            if rgn > 0 then
+
+                log_step("recovery: leftovers detected - triggering double eject pulse")
+                lever_pulse_remaining = 4
+                lever_pulse_timer = 1
+            end
+
+            batch_wait_finish = true
+            is_recovery_active = false
+            return
+        end
+        
+
+        if rgn > 0 then
+            log_step("recovery: reagents present, waiting for stable result")
+            recovery_last_reagents = rgn
+            recovery_timer = 10
+            recovery_phase = 1
+            return
+        else
+
+            log_step("recovery: empty furnace - starting recipe")
+            is_recovery_active = false
+            start_selected_recipe()
+            return
+        end
+    elseif recovery_phase == 1 then
+
+        if rgn ~= recovery_last_reagents then
+            log_step(string.format("recovery: reagents still changing (%s -> %s) - resetting stability timer", tostring(recovery_last_reagents), tostring(rgn)))
+            recovery_last_reagents = rgn
+            recovery_timer = 10
+            return
+        end
+        
+
+        log_step(string.format("recovery: reagents stable at %s - proceeding to decision", tostring(rgn)))
+        recovery_phase = 2
+        
+    elseif recovery_phase == 2 then
+
+        if rgn == target then
+            log_step("recovery: reagents match - resuming smelting")
+            furnace_run_active = true
+            has_seen_reagents = true
+            is_recovery_active = false
+        else
+            local req = recipe_requirements[requested_recipe]
+            local ingredient_count = 0
+            for _ in pairs(req or {}) do ingredient_count = ingredient_count + 1 end
+
+            if ingredient_count == 1 and requested_recipe <= 7 then
+                local diff = math.max(0, target - rgn)
+                if diff > 0 then
+                    log_step(string.format("recovery: partial ore match (%s/%s) - requesting %s more", tostring(rgn), tostring(target), tostring(diff)))
+                    local mat = MATERIAL_ORDER[requested_recipe]
+                    local role_key = silo_role_by_material[mat]
+                    if role_key then
+                        silo_request.active = true
+                        silo_request.items = {{ material = mat, role_key = role_key, remaining = diff / 50 }}
+                        silo_request.item_index = 1
+                        silo_request.phase = 0
+                    end
+                end
+                furnace_run_active = true
+                has_seen_reagents = true
+                is_recovery_active = false
+            else
+                log_step(string.format("recovery: reagent mismatch (%s/%s) for %s - ejecting and restarting", tostring(rgn), tostring(target), tostring(recipe_names[requested_recipe])))
+                lever_pulse_remaining = 4
+                lever_pulse_timer = 1
+                is_recovery_active = false
+                start_selected_recipe()
+            end
+        end
+    end
+end
+
+function run_furnace_activity_monitor()
+    if not furnace_run_active or silo_request.active or is_recovery_active then
+        furnace_stuck_ticks = 0
+        return
+    end
+
+    local rgn = readings.furnace_reagents or 0
+    local imp = readings.furnace_import_count or 0
+    local exp = readings.furnace_export_count or 0
+
+    if rgn ~= last_activity_reagents or imp ~= last_activity_import or exp ~= last_activity_export then
+        furnace_stuck_ticks = 0
+        last_activity_reagents = rgn
+        last_activity_import = imp
+        last_activity_export = exp
+    else
+        furnace_stuck_ticks = furnace_stuck_ticks + 1
+        if furnace_stuck_ticks % 20 == 0 then
+            log_step("monitor: no physical activity for " .. tostring(furnace_stuck_ticks) .. " ticks")
+        end
+
+        if furnace_stuck_ticks >= 100 then
+            log_step("monitor: STUCK DETECTED - triggering failsafe recovery eject")
+            lever_pulse_remaining = 4 
+            lever_pulse_timer = 1
+            furnace_stuck_ticks = 0
+            
+        end
+    end
+end
+
+function run_lever_pulse_logic()
+    if lever_pulse_remaining <= 0 then return end
+
+    local furnace = roles.furnace
+    if not role_is_bound(furnace) then
+        lever_pulse_remaining = 0
+        return
+    end
+
+    lever_pulse_timer = lever_pulse_timer - 1
+    if lever_pulse_timer <= 0 then
+        local setting = (lever_pulse_remaining % 2 == 0) and 1 or 0
+        safe_batch_write_name(furnace.prefab, furnace.namehash, LT.Open, setting)
+        lever_pulse_remaining = lever_pulse_remaining - 1
+        lever_pulse_timer = 5 
+        log_step("lever: pulse transition - Open=" .. tostring(setting) .. " (rem=" .. tostring(lever_pulse_remaining) .. ")")
+    end
+end
+
+
 local function run_mixer_ratio_logic()
     local mixer = roles.fuel_mixer
     if not role_is_bound(mixer) then
@@ -1143,7 +1351,7 @@ local function run_fuel_mixer_fill_logic()
     end
 end
 
-local function run_furnace_automation()
+function run_furnace_automation()
     local furnace = roles.furnace
     local fuel_pump = roles.fuel_pump
     local coolant_pump = roles.coolant_pump
@@ -1182,6 +1390,15 @@ local function run_furnace_automation()
     end
 
     safe_batch_write_name(furnace.prefab, furnace.namehash, LT.SettingInput, 100)
+    
+    if furnace_ignition_ticks > 0 then
+        furnace_ignition_ticks = furnace_ignition_ticks - 1
+        if (furnace_ignition_ticks % 5) < 2 then
+            safe_batch_write_name(furnace.prefab, furnace.namehash, LT.Activate, 1)
+            log_step("run_furnace_automation: Ignition Pulse Activate=1 (rem=" .. tostring(furnace_ignition_ticks) .. ")")
+        end
+    end
+
     if t < recipe_min_temp and t <= max_temp_hard then
         safe_batch_write_name(furnace.prefab, furnace.namehash, LT.Activate, 1)
         log_step("run_furnace_automation: Activate=1 (t=" .. tostring(t) .. " < " .. tostring(recipe_min_temp) .. ")")
@@ -1230,7 +1447,6 @@ local function run_furnace_automation()
     local target_reagents = recipe_target_reagents(requested_recipe, requested_amount)
 
     if current_recipe_hash == requested_hash and reagents >= target_reagents then
-        -- Safety: Ensure we are within the T/P window before marking as ready
         if t >= recipe_min_temp and t <= recipe_max_temp and p >= recipe_min_press and p <= recipe_max_press then
             recipe_ready = true
         end
@@ -1240,13 +1456,23 @@ local function run_furnace_automation()
     local is_empty = reagents <= 0
     local request_done = not silo_request.active
     
-    -- Robust completion check:
-    -- 1. If we successfully ready/smelted the recipe and now it's gone -> Done.
-    -- 2. If it's the first craft and we are just in vacuum wait -> Timeout.
-    local can_reset = recipe_ready or has_seen_reagents or (currenttime - furnace_start_tick > 45)
+    local can_reset = (recipe_ready or has_seen_reagents or (currenttime - furnace_start_tick > 45)) and not silo_request.active
     
     if furnace_run_active and is_empty and request_done then
         if can_reset then
+            if waiting_for_export_clear == 0 then
+                waiting_for_export_clear = 5
+                log_step("run_furnace_automation: smelting finished - waiting 5 ticks for memory sync")
+                return
+            end
+            
+            waiting_for_export_clear = waiting_for_export_clear - 1
+            if waiting_for_export_clear > 0 then return end
+
+            log_step("run_furnace_automation: clearing furnace memory before next task")
+            safe_batch_write_name(furnace.prefab, furnace.namehash, LT.ClearMemory, 1)
+            
+            lever_pulse_remaining = 0 
             safe_batch_write_name(furnace.prefab, furnace.namehash, LT.Open, 0)
             safe_batch_write_name(furnace.prefab, furnace.namehash, LT.SettingOutput, 0)
             furnace_run_active = false
@@ -1255,10 +1481,16 @@ local function run_furnace_automation()
             log_step("run_furnace_automation: smelting completed/reset")
         elseif current_recipe_hash == requested_hash then
             recipe_ready = true
-            safe_batch_write_name(furnace.prefab, furnace.namehash, LT.Open, 1)
+            if lever_pulse_remaining == 0 and waiting_for_export_clear == 0 then
+                lever_pulse_remaining = 2
+                lever_pulse_timer = 1
+            end
         end
     elseif recipe_ready then
-        safe_batch_write_name(furnace.prefab, furnace.namehash, LT.Open, 1)
+        if lever_pulse_remaining == 0 and waiting_for_export_clear == 0 then
+            lever_pulse_remaining = 2
+            lever_pulse_timer = 1
+        end
     end
 end
 
@@ -1297,16 +1529,15 @@ local function update_vending_readings()
     scan_vend(roles.vend_alloy,  "vend_alloy_free")
 end
 
-local function update_room_ventilation(tick_count)
+function update_room_ventilation(tick_count)
     local r_vent_in = roles.vent_1
     local r_vent_out = roles.vent_2_out
     local r_sensor = roles.room_sensor
     
     if not roles_are_bound({"vent_1", "vent_2_out", "room_sensor"}) then return end
     
-    -- Manual Override (Button On)
     if vent_enabled then
-        vent_pulse_state = 0 -- Cancel any active pulse
+        vent_pulse_state = 0 
         safe_batch_write_name(r_vent_in.prefab, r_vent_in.namehash, LT.On, 0)
         safe_batch_write_name(r_vent_out.prefab, r_vent_out.namehash, LT.On, 1)
         safe_batch_write_name(r_vent_out.prefab, r_vent_out.namehash, LT.Mode, 1)
@@ -1315,10 +1546,9 @@ local function update_room_ventilation(tick_count)
         return
     end
 
-    -- Toggle-OFF transition: Start a 10-tick refill pulse
     if last_vent_enabled then
         last_vent_enabled = false
-        vent_pulse_state = 3 -- Manual Refill Mode
+        vent_pulse_state = 3
         vent_pulse_start = tick_count
         log_step("vent: manual mode ended - starting 10t refill pulse")
     end
@@ -1326,57 +1556,50 @@ local function update_room_ventilation(tick_count)
     local temp = readings.room_temp or 0
     local pres = readings.room_press or 0
 
-    -- Pulse State Machine
+
     if vent_pulse_state == 0 then
-        -- Idle state: Check for auto-triggers
         if temp > 520 or pres > 250 then
-            vent_pulse_state = 1 -- Auto Extract
+            vent_pulse_state = 1
             vent_pulse_start = tick_count
             log_step("vent: auto-pulse start - extracting")
         end
     elseif vent_pulse_state == 1 then
-        -- Auto Extracting (4 ticks)
         if tick_count - vent_pulse_start >= 4 then
-            vent_pulse_state = 2 -- Auto Fill
+            vent_pulse_state = 2
             vent_pulse_start = tick_count
             log_step("vent: auto-pulse phase - filling")
         end
     elseif vent_pulse_state == 2 then
-        -- Auto Filling (4 ticks)
         if tick_count - vent_pulse_start >= 4 then
             vent_pulse_state = 0
             log_step("vent: auto-pulse end - idle")
         end
     elseif vent_pulse_state == 3 then
-        -- Manual Refill Pulse (10 ticks)
         if tick_count - vent_pulse_start >= 10 then
             vent_pulse_state = 0
             log_step("vent: manual refill pulse end - idle")
         end
     end
 
-    -- Apply state to hardware
+
     if vent_pulse_state == 1 then
-        -- Auto Extract (In Off, Out On)
         safe_batch_write_name(r_vent_in.prefab, r_vent_in.namehash, LT.On, 0)
         safe_batch_write_name(r_vent_out.prefab, r_vent_out.namehash, LT.On, 1)
         safe_batch_write_name(r_vent_out.prefab, r_vent_out.namehash, LT.Mode, 1)
         safe_batch_write_name(r_vent_out.prefab, r_vent_out.namehash, LT.PressureInternal, 40000)
     elseif vent_pulse_state == 2 or vent_pulse_state == 3 then
-        -- Filling (In On, Out Off)
         safe_batch_write_name(r_vent_in.prefab, r_vent_in.namehash, LT.On, 1)
         safe_batch_write_name(r_vent_out.prefab, r_vent_out.namehash, LT.On, 0)
         safe_batch_write_name(r_vent_in.prefab, r_vent_in.namehash, LT.Mode, 0)
         safe_batch_write_name(r_vent_in.prefab, r_vent_in.namehash, LT.PressureExternal, 101)
     else
-        -- Idle (Both Off)
         safe_batch_write_name(r_vent_in.prefab, r_vent_in.namehash, LT.On, 0)
         safe_batch_write_name(r_vent_out.prefab, r_vent_out.namehash, LT.On, 0)
     end
 end
 
 local batch_status_text = "Idle (Ready)"
-local function run_batch_sequencer()
+function run_batch_sequencer()
     if not is_batch_running then 
         if #smelting_queue == 0 then
             batch_status_text = "Idle (Queue Empty)"
@@ -1404,6 +1627,7 @@ local function run_batch_sequencer()
         batch_status_text = "Finalizing Batch..."
         if #smelting_queue > 0 then
             table.remove(smelting_queue, 1)
+            save_smelting_queue()
             dashboard_render(true)
         end
         batch_wait_finish = false
@@ -1424,6 +1648,7 @@ local function run_batch_sequencer()
         sync_selected_recipe()
         if not start_selected_recipe() then
             is_batch_running = false
+            save_control_settings()
             batch_status_text = "Idle (Error: Check Bindings/Stock)"
             log_step("sequencer: batch stopped - start failed")
             dashboard_render(true)
@@ -1434,14 +1659,23 @@ local function run_batch_sequencer()
         end
     else
         is_batch_running = false
+        save_control_settings()
         batch_status_text = "Idle (All Batches Done)"
         log_step("sequencer: all batches completed")
         dashboard_render(true)
     end
 end
 
-local function main_logic_tick(tick_count)
+function main_logic_tick(tick_count)
     update_readings()
+    run_lever_pulse_logic()
+    run_furnace_activity_monitor()
+    
+    if is_recovery_active then
+        run_recovery_logic(tick_count)
+        if is_recovery_active then return end
+    end
+
     run_furnace_automation()
     run_batch_sequencer()
     update_room_ventilation(tick_count)
@@ -1468,7 +1702,7 @@ local function reset_handles()
 end
 
 
-local function render_header()
+function render_header()
     local header = s:element({
         id = "header_bg",
         type = "panel",
@@ -1499,7 +1733,7 @@ local function render_header()
     })
 end
 
-local function render_nav_tabs()
+function render_nav(surface)
     local tabs = {
         { id = "nav_overview", page = "overview", text = "Overview" },
         { id = "nav_batch",    page = "batch",    text = "Batch" },
@@ -1532,7 +1766,7 @@ local function render_nav_tabs()
     end
 end
 
-local function update_nav_dynamic()
+function update_nav_dynamic()
     local function set_nav(key)
         if handles.nav[key] == nil then return end
         local active = (view == key)
@@ -1549,12 +1783,45 @@ local function update_nav_dynamic()
     set_nav("settings")
 end
 
-local function render_batch()
+function update_batch_dynamic()
+    if not handles.batch or not handles.batch.start_btn then return end
+
+    local entry = ingots[batch_selected_ingot_index] or ingots[1]
+    if handles.batch.icon then handles.batch.icon:set_props({ name = tostring(entry[2]) }) end
+    if handles.batch.ingot_name then handles.batch.ingot_name:set_props({ text = entry[1] }) end
+    if handles.batch.amount_value then handles.batch.amount_value:set_props({ text = tostring(batch_requested_amount) }) end
+
+    local all_ok, missing = validate_queue_stock()
+    
+    local missing_text = ""
+    if not all_ok then
+        missing_text = "Missing: "
+        for mat, amt in pairs(missing) do
+            missing_text = missing_text .. string.format("%d %s, ", amt, mat)
+        end
+        missing_text = missing_text:sub(1, -3)
+    elseif #smelting_queue > 0 then
+        missing_text = "All materials available. Ready to start."
+    end
+    
+    if handles.batch.missing_label then
+        handles.batch.missing_label:set_props({ text = missing_text })
+        handles.batch.missing_label:set_style({ color = all_ok and C.green or C.red })
+    end
+
+    local b_text = is_batch_running and "Stop Batch" or "Start Batch"
+    local b_bg = is_batch_running and C.red or (all_ok and #smelting_queue > 0 and C.green or C.bar_bg)
+    local b_color = (is_batch_running or (all_ok and #smelting_queue > 0)) and C.bg or C.text_dim
+
+    handles.batch.start_btn:set_props({ text = b_text })
+    handles.batch.start_btn:set_style({ bg = b_bg, color = b_color })
+end
+
+function render_batch(surface)
     local left_col_x = 8
     local left_col_w = 220
 
     local entry = ingots[batch_selected_ingot_index] or ingots[1]
-    local can_add = true
     
     s:element({
         id = "batch_selector_bg",
@@ -1669,6 +1936,7 @@ local function render_batch()
             if not merged then
                 table.insert(smelting_queue, { recipe_id = id, amount = batch_requested_amount })
             end
+            save_smelting_queue()
             dashboard_render(true)
         end
     })
@@ -1695,7 +1963,6 @@ local function render_batch()
         if req_y > H - 15 then break end
     end
 
-    -- Queue List Panel
     s:element({
         id = "queue_bg",
         type = "panel",
@@ -1736,6 +2003,7 @@ local function render_batch()
             style = { bg = C.red, text = "#FFFFFF", font_size = 7 },
             on_click = function()
                 table.remove(smelting_queue, i)
+                save_smelting_queue()
                 dashboard_render(true)
             end
         })
@@ -1744,7 +2012,6 @@ local function render_batch()
         if q_y > H - 28 then break end
     end
 
-    -- Safety verification label
     handles.batch.missing_label = s:element({
         id = "queue_missing_info",
         type = "label",
@@ -1753,8 +2020,6 @@ local function render_batch()
         style = { color = C.red, font_size = 8, align = "center" }
     })
 
-    -- Bottom Start/Stop Button
-    -- Batch Status and Furnace Readings
     s:element({
         id = "nav_batch_temp",
         type = "label",
@@ -1788,53 +2053,23 @@ local function render_batch()
         on_click = function()
             if is_batch_running then
                 is_batch_running = false
+                save_control_settings()
             elseif #smelting_queue > 0 then
-                local ok, missing = validate_queue_stock()
+                local ok, _ = validate_queue_stock()
                 if ok then
                     is_batch_running = true
+                    save_control_settings()
                     log_step("batch: started")
                 end
             end
             dashboard_render(true)
         end
     })
+    
+    update_batch_dynamic()
 end
 
-local function update_batch_dynamic()
-    if not handles.batch.start_btn then return end
-
-    local entry = ingots[batch_selected_ingot_index] or ingots[1]
-    if handles.batch.icon then handles.batch.icon:set_props({ name = tostring(entry[2]) }) end
-    if handles.batch.ingot_name then handles.batch.ingot_name:set_props({ text = entry[1] }) end
-    if handles.batch.amount_value then handles.batch.amount_value:set_props({ text = tostring(batch_requested_amount) }) end
-
-    local all_ok, missing = validate_queue_stock()
-    
-    -- Update Missing Materials Label
-    local missing_text = ""
-    if not all_ok then
-        missing_text = "Missing: "
-        for mat, amt in pairs(missing) do
-            missing_text = missing_text .. string.format("%d %s, ", amt, mat)
-        end
-        missing_text = missing_text:sub(1, -3)
-    elseif #smelting_queue > 0 then
-        missing_text = "All materials available. Ready to start."
-    end
-    
-    handles.batch.missing_label:set_props({ text = missing_text })
-    handles.batch.missing_label:set_style({ color = all_ok and C.green or C.red })
-
-    -- Update Start/Stop Button
-    local b_text = is_batch_running and "Stop Batch" or "Start Batch"
-    local b_bg = is_batch_running and C.red or (all_ok and #smelting_queue > 0 and C.green or C.bar_bg)
-    local b_color = (is_batch_running or (all_ok and #smelting_queue > 0)) and C.bg or C.text_dim
-
-    handles.batch.start_btn:set_props({ text = b_text })
-    handles.batch.start_btn:set_style({ bg = b_bg, color = b_color })
-end
-
-local function render_footer()
+function render_footer(surface)
     local footer = s:element({
         id = "footer_bg",
         type = "panel",
@@ -1859,7 +2094,7 @@ local function render_footer()
     })
 end
 
-local function update_footer_dynamic()
+function update_footer_dynamic()
     if handles.footer.left ~= nil then
         handles.footer.left:set_props({ text = "Time: " .. currenttime2 })
     end
@@ -1868,7 +2103,7 @@ local function update_footer_dynamic()
     end
 end
 
-local function render_overview()
+function render_overview(surface)
 
     local left_col_x = 8
     local left_col_w = 220
@@ -2320,7 +2555,7 @@ local function render_overview()
     end
 end
 
-local function update_overview_dynamic()
+function update_overview_dynamic()
 
         if handles.overview["ov_chute_toggle_btn"] ~= nil then
             local output_active = _G.steel_output_to_vend
@@ -2507,11 +2742,11 @@ local function update_overview_dynamic()
     end
 end
 
-local function update_settings_dynamic()
+function update_settings_dynamic()
     return
 end
 
-local function render_settings()
+function render_settings(surface)
     local panel_x, panel_y = 8, 60
     local panel_w, panel_h = W - 16, H - 82
     local tab_y = panel_y + 8
@@ -2625,7 +2860,7 @@ local function render_settings()
         return
     end
 
-    local function row(label, value, y, on_change)
+    function row(label, value, y, on_change)
         s:element({
             id = "ctl_label_" .. label,
             type = "label",
@@ -2685,7 +2920,7 @@ dashboard_render = function(force_rebuild)
         })
 
         render_header()
-        render_nav_tabs()
+        render_nav(surface)
 
         if desired == "overview" then
             render_overview()
@@ -2778,10 +3013,34 @@ end
 -- ==================== BOOT ====================
 
 load_roles_from_memory()
+
+for _, role_key in ipairs(MATERIAL_ORDER) do
+    local s_key = silo_role_by_material[role_key]
+    local s_role = roles[s_key]
+    if s_role and role_is_bound(s_role) then
+        safe_batch_write_name(s_role.prefab, s_role.namehash, LT.Open, 0)
+    end
+end
+
 load_control_settings()
+load_smelting_queue()
 sync_selected_recipe()
 normalize_settings_subtab()
+
+if is_batch_running then
+    is_recovery_active = true
+    recovery_timer = 20
+    recovery_phase = 0
+    log_step("boot: active batch detected - entering failsafe recovery")
+end
+
 update_readings()
+
+last_activity_reagents = readings.furnace_reagents or 0
+last_activity_import = readings.furnace_import_count or 0
+last_activity_export = readings.furnace_export_count or 0
+furnace_stuck_ticks = 0
+
 update_vending_readings()
 log_step("boot: initialization complete")
 safe_call("boot set_view", function()
@@ -2803,8 +3062,6 @@ while true do
 
     if tick % LIVE_REFRESH_TICKS == 0 then
         log_ui("loop: dashboard refresh")
-        --update_readings()
-        --update_vending_readings()
         safe_call("loop dashboard_render", function()
             dashboard_render(false)
         end)
