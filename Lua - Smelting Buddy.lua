@@ -116,9 +116,6 @@ function pressure_color(v)
 end
 
 -- ==================== MEMORY MAP ====================
--- Slots 0..85   : retained device selection pairs and control values
--- Some legacy device slots are intentionally skipped to preserve saved bindings.
--- Slots 80..85  : control values
 
 local MEM_DEVICE_BEGIN = 0
 local MEM_CONTROL_BEGIN = 80
@@ -312,6 +309,12 @@ local function resolve_name_hash(namehash)
     return tostring(resolved)
 end
 
+local function device_list_safe()
+    local ok, devices = pcall(device_list)
+    if not ok or type(devices) ~= "table" then return {} end
+    return devices
+end
+
 local function bool01(v)
     return (tonumber(v) or 0) > 0 and 1 or 0
 end
@@ -382,6 +385,7 @@ local role_defs = {
 roles = {}
 local settings_dropdown_selected = {}
 local settings_dropdown_open = {}
+local cached_role_dropdowns = {}
 
 for i, def in ipairs(role_defs) do
     roles[def.key] = {
@@ -447,7 +451,7 @@ local recipe_ready = false
 local stock_ok = false
 local vent_enabled = false
 local last_vent_enabled = false
-local vent_pulse_state = 0 -- 0:Idle, 1:AutoExtract, 2:AutoFill, 3:ManualFill
+local vent_pulse_state = 0
 local vent_pulse_start = 0
 local is_recovery_active = false
 local recovery_timer = 0
@@ -496,6 +500,7 @@ local readings = {
     furnace_export_count = nil,
     furnace_import_count = nil,
     fuel_pa_press = nil,
+    fuel_pa_temp = nil,
     fuel_pa_moles = nil,
     fuel_pa_vol = nil,
     coolant_pa_press = nil,
@@ -506,7 +511,6 @@ local readings = {
     room_temp = nil,
     o2_pa_press = nil,
     ch4_pa_press = nil,
-    furnace_export_count = nil,
     vend_normal_free = nil,
     vend_alloy_free = nil,
     vend_ingot_totals = {},
@@ -2845,7 +2849,7 @@ function update_overview_dynamic()
         end
     end
 
-    local vend_active = role_is_bound(roles.vend_normal) or role_is_bound(roles.vend_alloy)
+    local vend_active = (role_is_bound(roles.vend_normal) or role_is_bound(roles.vend_alloy)) and global_power_on
     local v_props = { visible = vend_active }
 
     if handles.overview.vend_title then handles.overview.vend_title:set_props(v_props) end
@@ -2914,22 +2918,19 @@ function render_settings(surface)
     local content_y = tab_y + 30
 
     if settings_subtab ~= "control" then
-        local devices = device_list() or {}
         local grouped_roles = current_settings_roles()
 
-        s:element({
-            id = "devices_title",
-            type = "label",
-            rect = { unit = "px", x = panel_x + 14, y = content_y, w = panel_w - 28, h = 14 },
-            props = { text = "Device Assignment" },
-            style = { font_size = 10, color = C.accent, align = "left" }
-        })
-
         local y = content_y + 18
-        for i = 1, #grouped_roles do
+        local items_per_page = 12
+        local total_pages = math.ceil(#grouped_roles / items_per_page)
+        local start_idx = (settings_device_page - 1) * items_per_page + 1
+        local end_idx = math.min(#grouped_roles, start_idx + items_per_page - 1)
+
+        for i = start_idx, end_idx do
             local role = grouped_roles[i]
             local def = role ~= nil and role_defs[role.index] or nil
-            local options, candidates, selected_idx = build_filtered_device_options(devices, role)
+            local cache = cached_role_dropdowns[def.key] or { opts = { "Select device..." }, cands = {}, sel = 0 }
+            local options, candidates, selected_idx = cache.opts, cache.cands, cache.sel
             local row_candidates = candidates
             settings_dropdown_selected[def.key] = selected_idx
 
@@ -2951,7 +2952,13 @@ function render_settings(surface)
                     open = settings_dropdown_open[def.key],
                 },
                 on_toggle = function()
-                    settings_dropdown_open[def.key] = settings_dropdown_open[def.key] == "true" and "false" or "true"
+                    local opening = settings_dropdown_open[def.key] ~= "true"
+                    if opening then
+                        local devs = device_list_safe()
+                        local opts, cands, sel = build_filtered_device_options(devs, role)
+                        cached_role_dropdowns[def.key] = { opts = opts, cands = cands, sel = sel }
+                    end
+                    settings_dropdown_open[def.key] = opening and "true" or "false"
                     dashboard_render(true)
                 end,
                 on_change = function(optionIndex)
@@ -2971,11 +2978,53 @@ function render_settings(surface)
                     end
 
                     save_role_to_memory(role)
+                    if cached_role_dropdowns[def.key] then
+                        cached_role_dropdowns[def.key].sel = selected_option
+                    end
                     dashboard_render(true)
                 end
             })
 
             y = y + 22
+        end
+
+        if total_pages > 1 then
+            local page_y = y + 5
+            s:element({
+                id = "settings_prev_page",
+                type = "button",
+                rect = { unit = "px", x = panel_x + 14, y = page_y, w = 60, h = 18 },
+                props = { text = "< Prev" },
+                style = { bg = C.panel_light, text = settings_device_page > 1 and C.text or C.text_dim, font_size = 9, gradient = "#292929ff", gradient_dir = "vertical" },
+                on_click = function()
+                    if settings_device_page > 1 then
+                        settings_device_page = settings_device_page - 1
+                        dashboard_render(true)
+                    end
+                end
+            })
+
+            s:element({
+                id = "settings_page_label",
+                type = "label",
+                rect = { unit = "px", x = panel_x + 84, y = page_y + 2, w = 150, h = 14 },
+                props = { text = "Page " .. settings_device_page .. " / " .. total_pages },
+                style = { font_size = 9, color = C.accent, align = "center" }
+            })
+
+            s:element({
+                id = "settings_next_page",
+                type = "button",
+                rect = { unit = "px", x = panel_x + 244, y = page_y, w = 60, h = 18 },
+                props = { text = "Next >" },
+                style = { bg = C.panel_light, text = settings_device_page < total_pages and C.text or C.text_dim, font_size = 9, gradient = "#292929ff", gradient_dir = "vertical" },
+                on_click = function()
+                    if settings_device_page < total_pages then
+                        settings_device_page = settings_device_page + 1
+                        dashboard_render(true)
+                    end
+                end
+            })
         end
 
         return
@@ -3160,6 +3209,24 @@ end
 -- ==================== BOOT ====================
 
 load_roles_from_memory()
+local boot_devs = device_list_safe()
+for _, def in ipairs(role_defs) do
+    local role = roles[def.key]
+    if role ~= nil and role_is_bound(role) then
+        local label = nil
+        for _, dev in ipairs(boot_devs) do
+            if (tonumber(dev.prefab_hash) or 0) == (tonumber(role.prefab) or 0)
+                and (tonumber(dev.name_hash) or 0) == (tonumber(role.namehash) or 0) then
+                label = tostring(dev.display_name or "")
+                break
+            end
+        end
+        if label == nil or label == "" then
+            label = resolve_name_hash(role.namehash)
+        end
+        cached_role_dropdowns[def.key] = { opts = { "Select device...", label }, cands = {}, sel = 1 }
+    end
+end
 
 for _, role_key in ipairs(MATERIAL_ORDER) do
     local s_key = silo_role_by_material[role_key]
