@@ -53,6 +53,8 @@ local ss = _G.ss
 local roles
 local requested_recipe
 local recipe_window
+local _recipe_win_cache_key = -1
+local _recipe_win_cache = {}
 
 local PREFABS = {
     logic_sorter = hash("StructureLogicSorter"),
@@ -130,7 +132,7 @@ local MEM_QUEUE_COUNT = 100
 local MEM_QUEUE_START = 101
 
 -- =============== Logs & util functions ===============
-local DEBUG_LOG_ENABLED = true
+local DEBUG_LOG_ENABLED = false
 local DEBUG_LOG_UI = false
 local debug_seq = 0
 local gt, gtH, gtM, gtS = 0, 0, 0, 0
@@ -230,13 +232,16 @@ local function selected_recipe_window()
     if recipe_index <= 0 or type(recipe_window) ~= "function" then
         return nil
     end
-
+    if _recipe_win_cache_key == recipe_index then
+        return _recipe_win_cache[1], _recipe_win_cache[2], _recipe_win_cache[3], _recipe_win_cache[4]
+    end
     local ok, t_min, t_max, p_min, p_max = pcall(recipe_window, recipe_index)
     if not ok then
         log_action("[ERROR] recipe_window lookup failed | " .. tostring(t_min))
         return nil
     end
-
+    _recipe_win_cache_key = recipe_index
+    _recipe_win_cache = { t_min, t_max, p_min, p_max }
     return t_min, t_max, p_min, p_max
 end
 
@@ -1749,8 +1754,6 @@ function main_logic_tick(tick_count)
     end
 
     set_status_visuals()
-
-    update_vending_readings()
 end
 
 -- ==================== UI RENDER ====================
@@ -2664,6 +2667,7 @@ function render_overview(surface)
 end
 
 function update_overview_dynamic()
+    if not global_power_on then return end
 
         if handles.overview["ov_chute_toggle_btn"] ~= nil then
             local output_active = _G.steel_output_to_vend
@@ -2864,7 +2868,7 @@ function update_overview_dynamic()
         if handles.overview[vkey] then handles.overview[vkey]:set_props(v_props) end
     end
 
-    if handles.overview["ov_chute_toggle_btn"] then handles.overview["ov_chute_toggle_btn"]:set_props(v_props) end
+    if handles.overview["ov_chute_toggle_btn"] then handles.overview["ov_chute_toggle_btn"]:set_props({ visible = global_power_on }) end
 end
 
 function update_settings_dynamic()
@@ -3308,6 +3312,7 @@ while true do
 
     if tick % LIVE_REFRESH_TICKS == 0 then
         log_ui("loop: dashboard refresh")
+        update_vending_readings()
         safe_call("loop dashboard_render", function()
             dashboard_render(false)
         end)
