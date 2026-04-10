@@ -494,6 +494,7 @@ local silo_request = {
     items = {},
     item_index = 1,
     phase = 0,
+    qty_before = 0,
 }
 
 local readings = {
@@ -862,6 +863,12 @@ local function render_chute_valve_buttons(surface, x, y)
     })
 end
 
+local function ore_needed_for_material(recipe_index, count_per, amount)
+    local scale = recipe_amount_scale(recipe_index)
+    if recipe_index == 8 then scale = scale / 4 end
+    return count_per * amount * scale
+end
+
 local function build_silo_request_items(recipe_index, amount)
     local items = {}
     local req = recipe_requirements[recipe_index]
@@ -875,10 +882,12 @@ local function build_silo_request_items(recipe_index, amount)
         if count ~= nil and count > 0 then
             local role_key = silo_role_by_material[material]
             if role_key ~= nil then
+                local ore = ore_needed_for_material(recipe_index, count, amount)
+                local stacks = math.ceil(ore / ORE_STACK_SIZE)
                 table.insert(items, {
                     material = material,
                     role_key = role_key,
-                    remaining = count * amount,
+                    remaining = stacks,
                 })
             end
         end
@@ -930,16 +939,23 @@ local function process_silo_request_tick()
     end
 
     if silo_request.phase == 0 then
-        log_step("process_silo_request_tick: open silo " .. tostring(current.role_key))
+        silo_request.qty_before = logic_or_zero(role, LT.Quantity)
+        log_step("process_silo_request_tick: open silo " .. tostring(current.role_key) .. " qty_before=" .. tostring(silo_request.qty_before))
         safe_batch_write_name(role.prefab, role.namehash, LT.ClearMemory, 1)
         safe_batch_write_name(role.prefab, role.namehash, LT.Open, 1)
         silo_request.phase = 1
     else
         log_step("process_silo_request_tick: close silo " .. tostring(current.role_key))
         safe_batch_write_name(role.prefab, role.namehash, LT.Open, 0)
-        current.remaining = (tonumber(current.remaining) or 0) - 1
+        local qty_after = logic_or_zero(role, LT.Quantity)
+        if qty_after < silo_request.qty_before then
+            current.remaining = (tonumber(current.remaining) or 0) - 1
+            log_step("process_silo_request_tick: stack confirmed qty " .. tostring(silo_request.qty_before) .. "->" .. tostring(qty_after) .. " remaining=" .. tostring(current.remaining))
+        else
+            log_step("[WARN] process_silo_request_tick: no stack dispensed for " .. tostring(current.role_key) .. " qty_before=" .. tostring(silo_request.qty_before) .. " qty_after=" .. tostring(qty_after) .. ", skipping")
+            current.remaining = 0
+        end
         silo_request.phase = 0
-        log_step("process_silo_request_tick: remaining=" .. tostring(current.remaining))
     end
 end
 
@@ -1093,8 +1109,9 @@ recipe_has_stock = function(recipe_index, amount)
     if req == nil then return false end
 
     for mat, count_per in pairs(req) do
-        local qty = read_silo_quantity(mat)
-        if qty < count_per * amount then
+        local ore_available = read_silo_ore_amount(mat)
+        local ore_needed = ore_needed_for_material(recipe_index, count_per, amount)
+        if ore_available < ore_needed then
             return false
         end
     end
