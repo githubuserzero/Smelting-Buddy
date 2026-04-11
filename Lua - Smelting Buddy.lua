@@ -47,9 +47,6 @@ local batch_write_name = ic.batch_write_name
 local batch_write = ic.batch_write
 local LST = ic.enums.LogicSlotType
 local batch_read_slot_name = ic.batch_read_slot_name
-local ic = _G.ic
-local util = _G.util
-local ss = _G.ss
 local roles
 local requested_recipe
 local recipe_window
@@ -127,9 +124,20 @@ local MEM_LIVE_REFRESH = MEM_CONTROL_BEGIN + 5
 local MEM_BATCH_RUNNING = MEM_CONTROL_BEGIN + 6
 local MEM_POWER_TOGGLE = MEM_CONTROL_BEGIN + 7
 local MEM_POWER_TARGET = MEM_CONTROL_BEGIN + 8
+local MEM_GAS_MIX = MEM_CONTROL_BEGIN + 9
+local MEM_GAS_MIX_MOLE = MEM_CONTROL_BEGIN + 10
 
 local MEM_QUEUE_COUNT = 100
 local MEM_QUEUE_START = 101
+
+local GAS_MIX_OPTIONS = {
+    { label = "O2 / CH4",  setting = 33.3, oxidiser_lt = LT.RatioOxygen,       fuel_lt = LT.RatioVolatiles },
+    { label = "O2 / H2",   setting = 33.3, oxidiser_lt = LT.RatioOxygen,       fuel_lt = LT.RatioHydrogen  },
+    { label = "N2O / CH4", setting = 50.0, oxidiser_lt = LT.RatioNitrousOxide, fuel_lt = LT.RatioVolatiles },
+    { label = "N2O / H2",  setting = 50.0, oxidiser_lt = LT.RatioNitrousOxide, fuel_lt = LT.RatioHydrogen  },
+    { label = "O3 / CH4",  setting = 40.0, oxidiser_lt = LT.RatioOzone,        fuel_lt = LT.RatioVolatiles },
+    { label = "O3 / H2",   setting = 25.0, oxidiser_lt = LT.RatioOzone,        fuel_lt = LT.RatioHydrogen  },
+}
 
 -- =============== Logs & util functions ===============
 local DEBUG_LOG_ENABLED = false
@@ -437,6 +445,9 @@ end
 
 local settings_subtab = "flow"
 local settings_device_page = 1
+local gas_mix_index = 1
+local gas_mix_dropdown_open = "false"
+local gas_mix_mole_based = false
 
 local max_temp_hard = 2500
 
@@ -1005,8 +1016,10 @@ local function save_control_settings()
     write(MEM_BATCH_RUNNING, is_batch_running and 1 or 0)
     write(MEM_POWER_TOGGLE, global_power_on and 2 or 1)
     write(MEM_POWER_TARGET, power_target_all and 1 or 0)
-    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s", 
-        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all)))
+    write(MEM_GAS_MIX, gas_mix_index)
+    write(MEM_GAS_MIX_MOLE, gas_mix_mole_based and 1 or 0)
+    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s gas_mix=%s mole=%s", 
+        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all), tostring(gas_mix_index), tostring(gas_mix_mole_based)))
 end
 
 local function load_control_settings()
@@ -1020,9 +1033,15 @@ local function load_control_settings()
     local tval = tonumber(read(MEM_POWER_TARGET)) or 1
     power_target_all = (tval == 1)
 
+    local gval = tonumber(read(MEM_GAS_MIX)) or 1
+    gas_mix_index = clamp(math.floor(gval), 1, #GAS_MIX_OPTIONS)
+
+    local mval = tonumber(read(MEM_GAS_MIX_MOLE)) or 1
+    gas_mix_mole_based = (mval == 1)
+
     save_control_settings()
-    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s", 
-        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all)))
+    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s gas_mix=%s mole=%s", 
+        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all), tostring(gas_mix_index), tostring(gas_mix_mole_based)))
 end
 
 -- ==================== DEVICE LIST HELPERS ====================
@@ -1410,25 +1429,87 @@ function run_lever_pulse_logic()
 end
 
 
-local function run_mixer_ratio_logic()
-    local mixer = roles.fuel_mixer
-    if not role_is_bound(mixer) then
-        return
+FUEL_MIXER_FILL_ON_THRESHOLD    = 10000
+FUEL_MIXER_FILL_OFF_THRESHOLD   = 30000
+FUEL_MIXER_FAST_CHECK_TICKS     = 1
+FUEL_MIXER_RATIO_TOLERANCE      = 0.025  -- 2.5% molar fraction tolerance
+FUEL_MIXER_RATIO_CORRECTION_GAIN = 2.5   -- how hard to push setting when off-ratio
+FUEL_MIXER_RATIO_MAX_OFFSET     = 40     -- max deviation from nominal setting
+
+local function get_fuel_tank_oxidiser_ratio(opt)
+    local fuel_pa = roles.fuel_pa
+    if not role_is_bound(fuel_pa) or opt.oxidiser_lt == nil then return nil end
+    return safe_batch_read_name(fuel_pa.prefab, fuel_pa.namehash, opt.oxidiser_lt, LBM.Average)
+end
+
+local function desired_mixer_setting(opt, current_oxidiser_ratio)
+    if current_oxidiser_ratio == nil then return opt.setting end
+    local target = opt.setting / 100
+    local err = target - current_oxidiser_ratio
+    if math.abs(err) < FUEL_MIXER_RATIO_TOLERANCE then
+        return opt.setting
     end
-    local setting = 33.3
-    safe_batch_write_name(mixer.prefab, mixer.namehash, LT.Setting, setting)
+    local correction = err * 100 * FUEL_MIXER_RATIO_CORRECTION_GAIN
+    local lo = math.max(5,  opt.setting - FUEL_MIXER_RATIO_MAX_OFFSET)
+    local hi = math.min(95, opt.setting + FUEL_MIXER_RATIO_MAX_OFFSET)
+    return clamp(opt.setting + correction, lo, hi)
+end
+
+local function run_mixer_ratio_logic()
+    if fuel_mixer_fill_active then return end
+    local mixer = roles.fuel_mixer
+    if not role_is_bound(mixer) then return end
+    local opt = GAS_MIX_OPTIONS[gas_mix_index] or GAS_MIX_OPTIONS[1]
+    safe_batch_write_name(mixer.prefab, mixer.namehash, LT.Setting, opt.setting)
 end
 
 local function run_fuel_mixer_fill_logic()
     local fuel_pa = roles.fuel_pa
     local fuel_mixer = roles.fuel_mixer
-    if not role_is_bound(fuel_pa) or not role_is_bound(fuel_mixer) then return end
-    local pressure = safe_batch_read_name(fuel_pa.prefab, fuel_pa.namehash, LT.Pressure, LBM.Average) or 0
-    if pressure < 5000 then
-        safe_batch_write_name(fuel_mixer.prefab, fuel_mixer.namehash, LT.On, 1)
-    elseif pressure >= 10000 then
-        safe_batch_write_name(fuel_mixer.prefab, fuel_mixer.namehash, LT.On, 0)
+    if not role_is_bound(fuel_pa) or not role_is_bound(fuel_mixer) then
+        fuel_mixer_fill_active = false
+        return
     end
+    local pressure = safe_batch_read_name(fuel_pa.prefab, fuel_pa.namehash, LT.Pressure, LBM.Average) or 0
+    local opt = GAS_MIX_OPTIONS[gas_mix_index] or GAS_MIX_OPTIONS[1]
+    if pressure >= FUEL_MIXER_FILL_OFF_THRESHOLD then
+        safe_batch_write_name(fuel_mixer.prefab, fuel_mixer.namehash, LT.On, 0)
+        fuel_mixer_fill_active = false
+        return
+    end
+    if pressure < FUEL_MIXER_FILL_ON_THRESHOLD then
+        if not fuel_mixer_fill_active then
+            safe_batch_write_name(fuel_mixer.prefab, fuel_mixer.namehash, LT.Setting, opt.setting)
+            safe_batch_write_name(fuel_mixer.prefab, fuel_mixer.namehash, LT.On, 1)
+            fuel_mixer_fill_active = true
+            log_step(string.format("fuel_mixer: START | press=%.0f | nominal_setting=%.1f",
+                pressure, opt.setting))
+        end
+    end
+end
+
+local function run_fuel_mixer_fast_safety_check()
+    if not fuel_mixer_fill_active then return end
+    local fuel_pa = roles.fuel_pa
+    local fuel_mixer = roles.fuel_mixer
+    if not role_is_bound(fuel_pa) or not role_is_bound(fuel_mixer) then
+        fuel_mixer_fill_active = false
+        return
+    end
+    local pressure = safe_batch_read_name(fuel_pa.prefab, fuel_pa.namehash, LT.Pressure, LBM.Average) or 0
+    local opt = GAS_MIX_OPTIONS[gas_mix_index] or GAS_MIX_OPTIONS[1]
+    if pressure >= FUEL_MIXER_FILL_OFF_THRESHOLD then
+        safe_batch_write_name(fuel_mixer.prefab, fuel_mixer.namehash, LT.On, 0)
+        fuel_mixer_fill_active = false
+        log_step("fuel_mixer_fast_check: target pressure reached - mixer OFF")
+        return
+    end
+    local current_ratio = get_fuel_tank_oxidiser_ratio(opt)
+    if gas_mix_mole_based then
+        local setting = desired_mixer_setting(opt, current_ratio)
+        safe_batch_write_name(fuel_mixer.prefab, fuel_mixer.namehash, LT.Setting, setting)
+    end
+
 end
 
 function run_furnace_automation()
@@ -1768,6 +1849,8 @@ function main_logic_tick(tick_count)
     if (tick_count % FUEL_MIXER_CHECK_TICKS) == 0 then
         run_mixer_ratio_logic()
         run_fuel_mixer_fill_logic()
+    elseif (tick_count % FUEL_MIXER_FAST_CHECK_TICKS) == 0 then
+        run_fuel_mixer_fast_safety_check()
     end
 
     set_status_visuals()
@@ -3100,11 +3183,89 @@ function render_settings(surface)
     s:element({
         id = "row_power_target_btn",
         type = "button",
-        rect = { unit = "px", x = panel_x + 212, y = y, w = 240, h = 18 },
+        rect = { unit = "px", x = panel_x + 212, y = y, w = 150, h = 18 },
         props = { text = label },
         style = { bg = C.panel_light, text = C.text, font_size = 9, gradient = "#292929ff", gradient_dir = "vertical" },
         on_click = function()
             power_target_all = not power_target_all
+            save_control_settings()
+            dashboard_render(true)
+        end
+    })
+
+    y = y + 30
+    s:element({
+        id = "gas_mix_header",
+        type = "label",
+        rect = { unit = "px", x = panel_x + 14, y = y, w = panel_w - 28, h = 14 },
+        props = { text = "Gas Mix" },
+        style = { font_size = 10, color = C.accent, align = "left" }
+    })
+
+    y = y + 18
+    local gas_mix_opts = {}
+    for _, opt in ipairs(GAS_MIX_OPTIONS) do
+        table.insert(gas_mix_opts, opt.label)
+    end
+    s:element({
+        id = "gas_mix_select",
+        type = "select",
+        rect = { unit = "px", x = panel_x + 14, y = y, w = 220, h = 20 },
+        props = {
+            options = table.concat(gas_mix_opts, "|"),
+            selected = gas_mix_index - 1,
+            open = gas_mix_dropdown_open,
+        },
+        on_toggle = function()
+            gas_mix_dropdown_open = (gas_mix_dropdown_open == "true") and "false" or "true"
+            dashboard_render(true)
+        end,
+        on_change = function(optionIndex)
+            local idx = (tonumber(optionIndex) or 0) + 1
+            gas_mix_index = clamp(math.floor(idx), 1, #GAS_MIX_OPTIONS)
+            gas_mix_dropdown_open = "false"
+            save_control_settings()
+            local mixer = roles.fuel_mixer
+            if role_is_bound(mixer) then
+                local opt = GAS_MIX_OPTIONS[gas_mix_index] or GAS_MIX_OPTIONS[1]
+                safe_batch_write_name(mixer.prefab, mixer.namehash, LT.Setting, opt.setting)
+            end
+            dashboard_render(true)
+        end
+    })
+
+    y = y + 24
+    s:element({
+        id = "gas_mix_hint",
+        type = "label",
+        rect = { unit = "px", x = panel_x + 14, y = y, w = panel_w - 28, h = 12 },
+        props = { text = "Oxidiser goes to Input 1 on the Mixer" },
+        style = { font_size = 8, color = C.text_dim, align = "left" }
+    })
+
+    y = y + 18
+    s:element({
+        id = "mole_mix_lbl",
+        type = "label",
+        rect = { unit = "px", x = panel_x + 18, y = y + 2, w = 150, h = 14 },
+        props = { text = "Mole-based Mixing (Experimental)" },
+        style = { font_size = 9, color = C.text, align = "left" }
+    })
+    local mole_active = gas_mix_mole_based
+    s:element({
+        id = "mole_mix_btn",
+        type = "button",
+        rect = { unit = "px", x = panel_x + 212, y = y, w = 150, h = 18 },
+        props = { text = mole_active and "ON  (ratio feedback active)" or "OFF (nominal setting only)" },
+        style = {
+            bg = mole_active and C.accent or C.panel_light,
+            text = mole_active and C.bg or C.text,
+            font_size = 9,
+            gradient = mole_active and "#0f4c63" or "#292929ff",
+            gradient_dir = "vertical"
+        },
+        on_click = function()
+            gas_mix_mole_based = not gas_mix_mole_based
             save_control_settings()
             dashboard_render(true)
         end
@@ -3196,6 +3357,7 @@ function serialize()
         is_batch_running = is_batch_running,
         global_power_on = global_power_on,
         power_target_all = power_target_all,
+        gas_mix_index = gas_mix_index,
     }
     local ok, json = pcall(util.json.encode, state)
     if not ok then return nil end
@@ -3222,6 +3384,7 @@ function deserialize(blob)
     is_batch_running = (decoded.is_batch_running == true)
     if decoded.global_power_on ~= nil then global_power_on = (decoded.global_power_on == true) end
     if decoded.power_target_all ~= nil then power_target_all = (decoded.power_target_all == true) end
+    if decoded.gas_mix_index ~= nil then gas_mix_index = clamp(math.floor(to_number_or(decoded.gas_mix_index, 1)), 1, #GAS_MIX_OPTIONS) end
     normalize_settings_subtab()
     sync_selected_recipe()
     log_step("deserialize: applied saved state")
