@@ -82,6 +82,7 @@ local GAS_SENSOR_PREFABS = { PREFABS.gas_sensor }
 local SILO_PREFABS = { PREFABS.silo }
 local FURNACE_PREFABS = { PREFABS.furnace, PREFABS.furnace_mirrored }
 local VEND_PREFABS = { PREFABS.vend, PREFABS.vend_fridge }
+local VEND_ORE_PREFABS = { PREFABS.vend }
 local LOGIC_SORTER_PREFABS = { PREFABS.logic_sorter, PREFABS.logic_sorter_mirrored }
 local OTHER_PREFABS = { PREFABS.sorter, PREFABS.stackers, PREFABS.sorter2, PREFABS.stackersmirror }
 local ORE_STACK_SIZE = 50
@@ -116,19 +117,35 @@ end
 
 -- ==================== MEMORY MAP ====================
 
-local MEM_DEVICE_BEGIN = 0
-local MEM_CONTROL_BEGIN = 80
+local MEM = {
+    DEVICE_BEGIN    = 0,
+    CONTROL_BEGIN   = 80,
+    MAX_TEMP_HARD   = 84,  
+    LIVE_REFRESH    = 85,  
+    BATCH_RUNNING   = 86,  
+    POWER_TOGGLE    = 87,  
+    POWER_TARGET    = 88, 
+    GAS_MIX         = 89, 
+    GAS_MIX_MOLE    = 90,
+    USE_VEND_ORE    = 91,  
+    EJECT_DELAY     = 92,  
+    EJECT_DELAY_TICKS = 93, 
+    QUEUE_COUNT     = 100,
+    QUEUE_START     = 101,
+}
 
-local MEM_MAX_TEMP_HARD = MEM_CONTROL_BEGIN + 4
-local MEM_LIVE_REFRESH = MEM_CONTROL_BEGIN + 5
-local MEM_BATCH_RUNNING = MEM_CONTROL_BEGIN + 6
-local MEM_POWER_TOGGLE = MEM_CONTROL_BEGIN + 7
-local MEM_POWER_TARGET = MEM_CONTROL_BEGIN + 8
-local MEM_GAS_MIX = MEM_CONTROL_BEGIN + 9
-local MEM_GAS_MIX_MOLE = MEM_CONTROL_BEGIN + 10
-
-local MEM_QUEUE_COUNT = 100
-local MEM_QUEUE_START = 101
+local ORE_HASHES = {
+    Iron    = { 1758427767 },
+    Copper  = { -707307845 },
+    Gold    = { -1348105509 },
+    Silicon = { 1103972403 },
+    Silver  = { -916518678 },
+    Lead    = { -190236170 },
+    Nickel  = { 1830218956 },
+    Coal    = { 1724793494, 252561409 },
+    Cobalt  = { -983091249 },
+    Steel   = { -654790771 },
+}
 
 local GAS_MIX_OPTIONS = {
     { label = "O2 / CH4",  setting = 33.3, oxidiser_lt = LT.RatioOxygen,       fuel_lt = LT.RatioVolatiles },
@@ -371,8 +388,8 @@ local role_defs = {
     { key = "furnace", label = "Furnace", default_name = "Furnace", slot = 1, allowed_prefabs = FURNACE_PREFABS },
     { key = "fuel_pa", label = "PA - Fuel", default_name = "PA - Fuel", slot = 2, allowed_prefabs = PA_PREFABS },
     { key = "coolant_pa", label = "PA - Coolant", default_name = "PA - Coolant", slot = 3, allowed_prefabs = PA_PREFABS },
-    { key = "o2_pa", label = "PA - O2 Analyzer", default_name = "PA - O2 Analyzer", slot = 4, allowed_prefabs = PA_PREFABS },
-    { key = "ch4_pa", label = "PA - CH4 Analyzer", default_name = "PA - CH4 Analyzer", slot = 5, allowed_prefabs = PA_PREFABS },
+    { key = "o2_pa", label = "PA - Oxidiser", default_name = "PA - Oxidiser", slot = 4, allowed_prefabs = PA_PREFABS },
+    { key = "ch4_pa", label = "PA - CH4 / H2", default_name = "PA - CH4 / H2", slot = 5, allowed_prefabs = PA_PREFABS },
     { key = "fuel_mixer", label = "Fuel Mixer", default_name = "Fuel Mixer", slot = 6, allowed_prefabs = MIXER_PREFABS },
     { key = "fuel_pump", label = "Pump - Fuel", default_name = "Pump - Fuel", slot = 7, allowed_prefabs = PUMP_PREFABS },
     { key = "coolant_pump", label = "Pump - Coolant", default_name = "Pump - Coolant", slot = 8, allowed_prefabs = PUMP_PREFABS },
@@ -392,6 +409,16 @@ local role_defs = {
     { key = "vend_normal", label = "Vending Normal", default_name = "Vending Normal", slot = 34, allowed_prefabs = VEND_PREFABS },
     { key = "vend_alloy",  label = "Vending Special",  default_name = "Vending Special",  slot = 35, allowed_prefabs = VEND_PREFABS },
     { key = "chute_valve", label = "Logic Sorter", default_name = "Logic Sorter", slot = 36, allowed_prefabs = LOGIC_SORTER_PREFABS },
+    { key = "vend_iron",    label = "VM - Iron Ore",    default_name = "VM - Iron Ore",    slot = 102, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_copper",  label = "VM - Copper Ore",  default_name = "VM - Copper Ore",  slot = 103, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_gold",    label = "VM - Gold Ore",    default_name = "VM - Gold Ore",    slot = 104, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_silicon", label = "VM - Silicon Ore", default_name = "VM - Silicon Ore", slot = 105, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_silver",  label = "VM - Silver Ore",  default_name = "VM - Silver Ore",  slot = 106, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_lead",    label = "VM - Lead Ore",    default_name = "VM - Lead Ore",    slot = 107, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_nickel",  label = "VM - Nickel Ore",  default_name = "VM - Nickel Ore",  slot = 108, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_coal",    label = "VM - Coal Ore",    default_name = "VM - Coal Ore",    slot = 109, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_cobalt",  label = "VM - Cobalt Ore",  default_name = "VM - Cobalt Ore",  slot = 110, allowed_prefabs = VEND_ORE_PREFABS },
+    { key = "vend_steel",   label = "VM - Steel",       default_name = "VM - Steel",       slot = 111, allowed_prefabs = VEND_ORE_PREFABS },
 }
 
 
@@ -420,7 +447,7 @@ local function load_roles_from_memory()
     for _, def in ipairs(role_defs) do
         local role = roles[def.key]
         local slot = tonumber(role.slot) or role.index
-        local base = MEM_DEVICE_BEGIN + (slot - 1) * 2
+        local base = MEM.DEVICE_BEGIN + (slot - 1) * 2
         role.prefab = tonumber(read(base)) or 0
         role.namehash = tonumber(read(base + 1)) or 0
         if role_is_bound(role) then
@@ -435,7 +462,7 @@ end
 
 local function save_role_to_memory(role)
     local slot = tonumber(role.slot) or role.index
-    local base = MEM_DEVICE_BEGIN + (slot - 1) * 2
+    local base = MEM.DEVICE_BEGIN + (slot - 1) * 2
     write(base, tonumber(role.prefab) or 0)
     write(base + 1, tonumber(role.namehash) or 0)
     log_step(string.format("save_role_to_memory: %s prefab=%s namehash=%s", tostring(role.key), tostring(role.prefab), tostring(role.namehash)))
@@ -507,6 +534,19 @@ local silo_request = {
     phase = 0,
     qty_before = 0,
 }
+
+local vend_ore_request = {
+    active = false,
+    items = {},
+    item_index = 1,
+    phase = 0,
+}
+
+local use_vend_ore_mode = false
+local eject_delay_enabled = false
+local eject_delay_ticks   = 5
+local eject_delay_timer   = 0
+local eject_delay_pending = false
 
 local readings = {
     furnace_temp = nil,
@@ -607,8 +647,20 @@ local silo_role_by_material = {
     Steel = "silo_steel",
 }
 
-local MATERIAL_ORDER = { "Iron", "Copper", "Gold", "Silicon", "Silver", "Lead", "Nickel", "Coal", "Cobalt", "Steel" }
+local vend_ore_role_by_material = {
+    Iron = "vend_iron",
+    Copper = "vend_copper",
+    Gold = "vend_gold",
+    Silicon = "vend_silicon",
+    Silver = "vend_silver",
+    Lead = "vend_lead",
+    Nickel = "vend_nickel",
+    Coal = "vend_coal",
+    Cobalt = "vend_cobalt",
+    Steel = "vend_steel",
+}
 
+local MATERIAL_ORDER = { "Iron", "Copper", "Gold", "Silicon", "Silver", "Lead", "Nickel", "Coal", "Cobalt", "Steel" }
 
 local SILO_HANDLE_KEY = {}
 for _, mat in ipairs(MATERIAL_ORDER) do
@@ -645,6 +697,18 @@ local settings_subtab_groups = {
         "silo_coal",
         "silo_cobalt",
         "silo_steel",
+    },
+    vending = {
+        "vend_iron",
+        "vend_copper",
+        "vend_gold",
+        "vend_silicon",
+        "vend_silver",
+        "vend_lead",
+        "vend_nickel",
+        "vend_coal",
+        "vend_cobalt",
+        "vend_steel",
     },
 }
 
@@ -816,10 +880,12 @@ local function normalize_settings_subtab()
 
     if settings_subtab ~= "flow"
         and settings_subtab ~= "silos"
+        and settings_subtab ~= "vending"
         and settings_subtab ~= "control" then
         settings_subtab = "flow"
     end
 end
+
 
 -- ==================== LOGIC SORTER CONTROL ====================
 local STEEL_HASH = ic.hash("ItemSteelIngot")
@@ -970,6 +1036,135 @@ local function process_silo_request_tick()
     end
 end
 
+local function build_vend_ore_request_items(recipe_index, amount)
+    local items = {}
+    local req = recipe_requirements[recipe_index]
+    if req == nil then return items end
+
+    for _, material in ipairs(MATERIAL_ORDER) do
+        local count = req[material]
+        if count ~= nil and count > 0 then
+            local role_key = vend_ore_role_by_material[material]
+            if role_key ~= nil then
+                local ore = ore_needed_for_material(recipe_index, count, amount)
+                local stacks = math.ceil(ore / ORE_STACK_SIZE)
+                table.insert(items, {
+                    material = material,
+                    role_key = role_key,
+                    remaining = stacks,
+                    hash_index = 1,
+                    export_count_before = 0,
+                })
+            end
+        end
+    end
+    return items
+end
+
+local function queue_vend_ore_requests(recipe_index, amount)
+    log_step(string.format("queue_vend_ore_requests: recipe=%s amount=%s", tostring(recipe_index), tostring(amount)))
+    vend_ore_request.active = true
+    vend_ore_request.items = build_vend_ore_request_items(recipe_index, amount)
+    vend_ore_request.item_index = 1
+    vend_ore_request.phase = 0
+
+    if #vend_ore_request.items == 0 then
+        vend_ore_request.active = false
+        log_step("queue_vend_ore_requests: no items queued")
+    else
+        log_step("queue_vend_ore_requests: queued items=" .. tostring(#vend_ore_request.items))
+    end
+end
+
+local function process_vend_ore_request_tick()
+    if not vend_ore_request.active then return end
+
+    local current = vend_ore_request.items[vend_ore_request.item_index]
+    while current ~= nil and (tonumber(current.remaining) or 0) <= 0 do
+        vend_ore_request.item_index = vend_ore_request.item_index + 1
+        current = vend_ore_request.items[vend_ore_request.item_index]
+    end
+
+    if current == nil then
+        vend_ore_request.active = false
+        log_step("process_vend_ore_request_tick: complete")
+        return
+    end
+
+    local role = roles[current.role_key]
+    if role == nil or not role_is_bound(role) then
+        current.remaining = 0
+        log_step("process_vend_ore_request_tick: missing role " .. tostring(current.role_key))
+        return
+    end
+
+    local hashes = ORE_HASHES[current.material]
+    if hashes == nil or #hashes == 0 then
+        current.remaining = 0
+        log_step("[WARN] process_vend_ore_request_tick: no hash for material " .. tostring(current.material))
+        return
+    end
+
+    if vend_ore_request.phase == 0 then
+        local busy_hash = logic_or_zero(role, LT.RequestHash)
+        if busy_hash ~= 0 then
+            current.timeout = (current.timeout or 25) - 1
+            if current.timeout <= 0 then
+                log_step("[WARN] vend_ore_req: VM stuck busy for " .. tostring(current.material) .. " - skipping")
+                current.remaining = 0
+                current.timeout = 25
+            end
+            return
+        end
+
+        local exp = logic_or_zero(role, LT.ExportCount)
+        current.export_count_before = exp
+        if current.hash_index == nil or current.hash_index > #hashes then current.hash_index = 1 end
+        local chosen_hash = hashes[current.hash_index]
+        
+        safe_batch_write_name(role.prefab, role.namehash, LT.RequestHash, chosen_hash)
+        
+        log_step(string.format("vend_ore_req: ph0 RequestHash=%s %s exp_before=%s",
+            tostring(chosen_hash), tostring(current.material), tostring(exp)))
+        
+        current.timeout = 25 -- 12.5 sec timeout for ejection
+        vend_ore_request.phase = 1
+
+    elseif vend_ore_request.phase == 1 then
+        local exp_now = logic_or_zero(role, LT.ExportCount)
+        if exp_now > current.export_count_before then
+            current.remaining = (tonumber(current.remaining) or 0) - 1
+            current.hash_index = 1
+            current.timeout = 25
+            log_step(string.format("vend_ore_req: confirmed %s exp %s->%s remaining=%s",
+                tostring(current.material), tostring(current.export_count_before), tostring(exp_now), tostring(current.remaining)))
+            
+            vend_ore_request.phase = 2
+        else
+            current.timeout = (current.timeout or 25) - 1
+            if current.timeout <= 0 then
+                if current.hash_index < #hashes then
+                    current.hash_index = current.hash_index + 1
+                    log_step(string.format("vend_ore_req: hash miss %s, trying hash idx %d",
+                        tostring(current.material), current.hash_index))
+                    current.timeout = 25
+                    vend_ore_request.phase = 0
+                else
+                    log_step(string.format("[WARN] vend_ore_req: timeout exhausted %s - skipping %d stacks",
+                        tostring(current.material), tonumber(current.remaining) or 0))
+                    current.remaining = 0
+                    current.timeout = 25
+                    vend_ore_request.phase = 0
+                end
+            end
+        end
+
+    elseif vend_ore_request.phase == 2 then
+        vend_ore_request.phase = 0
+    end
+end
+
+
 local function start_selected_recipe()
     log_step("start_selected_recipe: begin")
     sync_selected_recipe()
@@ -995,8 +1190,15 @@ local function start_selected_recipe()
     furnace_ignition_ticks = 25
     has_seen_reagents = false
     recipe_ready = false
-    queue_silo_requests(requested_recipe, requested_amount)
-    log_step("start_selected_recipe: started")
+    eject_delay_pending = false
+    eject_delay_timer = 0
+
+    if use_vend_ore_mode then
+        queue_vend_ore_requests(requested_recipe, requested_amount)
+    else
+        queue_silo_requests(requested_recipe, requested_amount)
+    end
+    log_step("start_selected_recipe: started (vend_mode=" .. tostring(use_vend_ore_mode) .. ")")
 
     return true
 end
@@ -1011,37 +1213,51 @@ end
 
 local function save_control_settings()
     validate_control_settings()
-    write(MEM_MAX_TEMP_HARD, max_temp_hard)
-    write(MEM_LIVE_REFRESH, LIVE_REFRESH_TICKS)
-    write(MEM_BATCH_RUNNING, is_batch_running and 1 or 0)
-    write(MEM_POWER_TOGGLE, global_power_on and 2 or 1)
-    write(MEM_POWER_TARGET, power_target_all and 1 or 0)
-    write(MEM_GAS_MIX, gas_mix_index)
-    write(MEM_GAS_MIX_MOLE, gas_mix_mole_based and 1 or 0)
-    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s gas_mix=%s mole=%s", 
-        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all), tostring(gas_mix_index), tostring(gas_mix_mole_based)))
+    write(MEM.MAX_TEMP_HARD, max_temp_hard)
+    write(MEM.LIVE_REFRESH, LIVE_REFRESH_TICKS)
+    write(MEM.BATCH_RUNNING, is_batch_running and 1 or 0)
+    write(MEM.POWER_TOGGLE, global_power_on and 2 or 1)
+    write(MEM.POWER_TARGET, power_target_all and 1 or 0)
+    write(MEM.GAS_MIX, gas_mix_index)
+    write(MEM.GAS_MIX_MOLE, gas_mix_mole_based and 1 or 0)
+    write(MEM.USE_VEND_ORE, use_vend_ore_mode and 1 or 0)
+    write(MEM.EJECT_DELAY, eject_delay_enabled and 1 or 0)
+    write(MEM.EJECT_DELAY_TICKS, eject_delay_ticks)
+    log_step(string.format("save_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s gas_mix=%s mole=%s vend_ore=%s eject_delay=%s delay_ticks=%s",
+        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all),
+        tostring(gas_mix_index), tostring(gas_mix_mole_based), tostring(use_vend_ore_mode), tostring(eject_delay_enabled), tostring(eject_delay_ticks)))
 end
 
 local function load_control_settings()
-    max_temp_hard = to_number_or(read(MEM_MAX_TEMP_HARD), max_temp_hard)
-    LIVE_REFRESH_TICKS = to_number_or(read(MEM_LIVE_REFRESH), MIN_LIVE_REFRESH_TICKS)
-    is_batch_running = (read(MEM_BATCH_RUNNING) == 1)
-    
-    local pval = tonumber(read(MEM_POWER_TOGGLE)) or 0
+    max_temp_hard = to_number_or(read(MEM.MAX_TEMP_HARD), max_temp_hard)
+    LIVE_REFRESH_TICKS = to_number_or(read(MEM.LIVE_REFRESH), MIN_LIVE_REFRESH_TICKS)
+    is_batch_running = (read(MEM.BATCH_RUNNING) == 1)
+
+    local pval = tonumber(read(MEM.POWER_TOGGLE)) or 0
     if pval > 0 then global_power_on = (pval == 2) end
-    
-    local tval = tonumber(read(MEM_POWER_TARGET)) or 1
+
+    local tval = tonumber(read(MEM.POWER_TARGET)) or 1
     power_target_all = (tval == 1)
 
-    local gval = tonumber(read(MEM_GAS_MIX)) or 1
+    local gval = tonumber(read(MEM.GAS_MIX)) or 1
     gas_mix_index = clamp(math.floor(gval), 1, #GAS_MIX_OPTIONS)
 
-    local mval = tonumber(read(MEM_GAS_MIX_MOLE)) or 1
+    local mval = tonumber(read(MEM.GAS_MIX_MOLE)) or 1
     gas_mix_mole_based = (mval == 1)
 
+    local vval = tonumber(read(MEM.USE_VEND_ORE)) or 0
+    use_vend_ore_mode = (vval == 1)
+
+    local dval = tonumber(read(MEM.EJECT_DELAY)) or 0
+    eject_delay_enabled = (dval == 1)
+
+    local dtval = tonumber(read(MEM.EJECT_DELAY_TICKS)) or 5
+    eject_delay_ticks = math.max(1, math.floor(dtval))
+
     save_control_settings()
-    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s gas_mix=%s mole=%s", 
-        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all), tostring(gas_mix_index), tostring(gas_mix_mole_based)))
+    log_step(string.format("load_control_settings: max_temp_hard=%s refresh_ticks=%s power=%s target_all=%s gas_mix=%s mole=%s vend_ore=%s eject_delay=%s delay_ticks=%s",
+        tostring(max_temp_hard), tostring(LIVE_REFRESH_TICKS), tostring(global_power_on), tostring(power_target_all),
+        tostring(gas_mix_index), tostring(gas_mix_mole_based), tostring(use_vend_ore_mode), tostring(eject_delay_enabled), tostring(eject_delay_ticks)))
 end
 
 -- ==================== DEVICE LIST HELPERS ====================
@@ -1123,12 +1339,32 @@ local function read_silo_ore_amount(material)
     return read_silo_quantity(material) * ORE_STACK_SIZE
 end
 
+local function read_vend_ore_stacks(material)
+    local role_key = vend_ore_role_by_material[material]
+    if role_key == nil then return 0 end
+    local role = roles[role_key]
+    if role == nil then return 0 end
+    return logic_or_zero(role, LT.Quantity)
+end
+
+local function read_vend_ore_amount(material)
+    return read_vend_ore_stacks(material) * ORE_STACK_SIZE
+end
+
+local function read_ore_amount(material)
+    if use_vend_ore_mode then
+        return read_vend_ore_amount(material)
+    else
+        return read_silo_ore_amount(material)
+    end
+end
+
 recipe_has_stock = function(recipe_index, amount)
     local req = recipe_requirements[recipe_index]
     if req == nil then return false end
 
     for mat, count_per in pairs(req) do
-        local ore_available = read_silo_ore_amount(mat)
+        local ore_available = read_ore_amount(mat)
         local ore_needed = ore_needed_for_material(recipe_index, count_per, amount)
         if ore_available < ore_needed then
             return false
@@ -1156,7 +1392,7 @@ local function validate_queue_stock()
     local missing = {}
     local all_ok = true
     for mat, needed in pairs(totals) do
-        local available = read_silo_ore_amount(mat)
+        local available = read_ore_amount(mat)
         if available < needed then
             missing[mat] = needed - available
             all_ok = false
@@ -1167,10 +1403,10 @@ end
 
 function save_smelting_queue()
     local count = #smelting_queue
-    write(MEM_QUEUE_COUNT, count)
+    write(MEM.QUEUE_COUNT, count)
     for i = 1, math.min(count, 50) do
         local item = smelting_queue[i]
-        local base = MEM_QUEUE_START + (i - 1) * 2
+        local base = MEM.QUEUE_START + (i - 1) * 2
         write(base, item.recipe_id or 0)
         write(base + 1, item.amount or 0)
     end
@@ -1178,11 +1414,11 @@ function save_smelting_queue()
 end
 
 function load_smelting_queue()
-    local count = tonumber(read(MEM_QUEUE_COUNT)) or 0
+    local count = tonumber(read(MEM.QUEUE_COUNT)) or 0
     smelting_queue = {}
     if count > 0 then
         for i = 1, math.min(count, 50) do
-            local base = MEM_QUEUE_START + (i - 1) * 2
+            local base = MEM.QUEUE_START + (i - 1) * 2
             local recipe_id = tonumber(read(base)) or 0
             local amount = tonumber(read(base + 1)) or 0
             if recipe_id > 0 then
@@ -1429,12 +1665,12 @@ function run_lever_pulse_logic()
 end
 
 
-FUEL_MIXER_FILL_ON_THRESHOLD    = 10000
-FUEL_MIXER_FILL_OFF_THRESHOLD   = 30000
-FUEL_MIXER_FAST_CHECK_TICKS     = 1
-FUEL_MIXER_RATIO_TOLERANCE      = 0.025  -- 2.5% molar fraction tolerance
-FUEL_MIXER_RATIO_CORRECTION_GAIN = 2.5   -- how hard to push setting when off-ratio
-FUEL_MIXER_RATIO_MAX_OFFSET     = 40     -- max deviation from nominal setting
+FUEL_MIXER_FILL_ON_THRESHOLD = 10000
+FUEL_MIXER_FILL_OFF_THRESHOLD = 30000
+FUEL_MIXER_FAST_CHECK_TICKS = 1
+FUEL_MIXER_RATIO_TOLERANCE = 0.025
+FUEL_MIXER_RATIO_CORRECTION_GAIN = 2.5
+FUEL_MIXER_RATIO_MAX_OFFSET = 40
 
 local function get_fuel_tank_oxidiser_ratio(opt)
     local fuel_pa = roles.fuel_pa
@@ -1615,10 +1851,51 @@ function run_furnace_automation()
     if reagents > 0 or recipe_ready then has_seen_reagents = true end
 
     local is_empty = reagents <= 0
-    local request_done = not silo_request.active
-    
-    local can_reset = (recipe_ready or has_seen_reagents or (currenttime - furnace_start_tick > 45)) and not silo_request.active
-    
+    local request_done = (not silo_request.active) and (not vend_ore_request.active)
+
+    local can_reset = (recipe_ready or has_seen_reagents or (currenttime - furnace_start_tick > 45)) and request_done
+
+    local function do_eject_pulse()
+        if lever_pulse_remaining == 0 and waiting_for_export_clear == 0 then
+            lever_pulse_remaining = 2
+            lever_pulse_timer = 1
+        end
+    end
+
+    if eject_delay_enabled and recipe_ready and not eject_delay_pending then
+        eject_delay_pending = true
+        eject_delay_timer = eject_delay_ticks
+        log_step(string.format("run_furnace_automation: eject delay started (%d ticks)", eject_delay_ticks))
+    end
+
+    if eject_delay_pending then
+        if eject_delay_timer > 0 then
+            eject_delay_timer = eject_delay_timer - 1
+            log_step(string.format("run_furnace_automation: eject delay countdown %d", eject_delay_timer))
+            return
+        end
+
+        local re_reagents = readings.furnace_reagents or 0
+        local re_target   = recipe_target_reagents(requested_recipe, requested_amount)
+        local re_hash     = math.floor(readings.furnace_recipe_hash or 0)
+        local re_t        = readings.furnace_temp or 0
+        local re_p        = readings.furnace_press or 0
+        local re_ok = (re_reagents >= re_target)
+            and (re_hash == requested_hash)
+            and (re_t >= recipe_min_temp and re_t <= recipe_max_temp)
+            and (re_p >= recipe_min_press and re_p <= recipe_max_press)
+        if re_ok then
+            log_step("run_furnace_automation: eject delay done - conditions still met, ejecting")
+            eject_delay_pending = false
+            do_eject_pulse()
+        else
+            log_step("run_furnace_automation: eject delay done - conditions NOT met, re-waiting")
+            recipe_ready = false
+            eject_delay_pending = false
+        end
+        return
+    end
+
     if furnace_run_active and is_empty and request_done then
         if can_reset then
             if waiting_for_export_clear == 0 then
@@ -1626,34 +1903,34 @@ function run_furnace_automation()
                 log_step("run_furnace_automation: smelting finished - waiting 5 ticks for memory sync")
                 return
             end
-            
+
             waiting_for_export_clear = waiting_for_export_clear - 1
             if waiting_for_export_clear > 0 then return end
 
             log_step("run_furnace_automation: clearing furnace memory before next task")
             safe_batch_write_name(furnace.prefab, furnace.namehash, LT.ClearMemory, 1)
-            
-            lever_pulse_remaining = 0 
+
+            lever_pulse_remaining = 0
             safe_batch_write_name(furnace.prefab, furnace.namehash, LT.Open, 0)
             safe_batch_write_name(furnace.prefab, furnace.namehash, LT.SettingOutput, 0)
             furnace_run_active = false
             has_seen_reagents = false
             recipe_ready = false
+            eject_delay_pending = false
             log_step("run_furnace_automation: smelting completed/reset")
         elseif current_recipe_hash == requested_hash then
             recipe_ready = true
-            if lever_pulse_remaining == 0 and waiting_for_export_clear == 0 then
-                lever_pulse_remaining = 2
-                lever_pulse_timer = 1
+            if not eject_delay_enabled then
+                do_eject_pulse()
             end
         end
     elseif recipe_ready then
-        if lever_pulse_remaining == 0 and waiting_for_export_clear == 0 then
-            lever_pulse_remaining = 2
-            lever_pulse_timer = 1
+        if not eject_delay_enabled then
+            do_eject_pulse()
         end
     end
 end
+
 
 local function safe_batch_read_slot(prefab, namehash, slot, logic_slot_type)
     if batch_read_slot_name == nil then return nil end
@@ -1774,7 +2051,8 @@ function run_batch_sequencer()
 
     if furnace_run_active then
         batch_wait_finish = true
-        if silo_request.active then
+        local is_requesting = silo_request.active or vend_ore_request.active
+        if is_requesting then
             batch_status_text = "Requesting Ores..."
         elseif not has_seen_reagents then
             batch_status_text = "Waiting for Ores..."
@@ -1831,7 +2109,7 @@ function main_logic_tick(tick_count)
     update_readings()
     run_lever_pulse_logic()
     run_furnace_activity_monitor()
-    
+
     if is_recovery_active then
         run_recovery_logic(tick_count)
         if is_recovery_active then return end
@@ -1842,8 +2120,12 @@ function main_logic_tick(tick_count)
     update_room_ventilation(tick_count)
     sync_selected_recipe()
 
-    if furnace_run_active and silo_request.active then
-        process_silo_request_tick()
+    if furnace_run_active then
+        if use_vend_ore_mode and vend_ore_request.active then
+            process_vend_ore_request_tick()
+        elseif (not use_vend_ore_mode) and silo_request.active then
+            process_silo_request_tick()
+        end
     end
 
     if (tick_count % FUEL_MIXER_CHECK_TICKS) == 0 then
@@ -2648,7 +2930,7 @@ function render_overview(surface)
         id = "silo_totals_title",
         type = "label",
         rect = { unit = "px", x = x0 - 44, y = 240, w = 234, h = 12 },
-        props = { text = "Silo: Ore Quantity", visible = ui_vis },
+        props = { text = use_vend_ore_mode and "VM: Ore Quantity" or "Silo: Ore Quantity", visible = ui_vis },
         style = { font_size = 8, color = "#7bbcc6", align = "center" }
     })
 
@@ -2660,7 +2942,7 @@ function render_overview(surface)
         local col_x = x0 + (col * silo_col_gap)
         local y = 255 + row * 9
         local key = SILO_HANDLE_KEY[mat]
-        local ore_amount = read_silo_ore_amount(mat)
+        local ore_amount = read_ore_amount(mat)
 
         s:element({
             id = key .. "_label",
@@ -2925,7 +3207,7 @@ function update_overview_dynamic()
         local key = SILO_HANDLE_KEY[mat]
         local h = handles.overview[key]
         if h ~= nil then
-            local ore_amount = read_silo_ore_amount(mat)
+            local ore_amount = read_ore_amount(mat)
             h:set_props({ text = fmt(ore_amount, 0) })
             h:set_style({ font_size = 8, color = stock_amount_color(ore_amount), align = "left" })
         end
@@ -2990,19 +3272,24 @@ function render_settings(surface)
     local subtabs = {
         { id = "settings_flow", text = "MAIN", key = "flow" },
         { id = "settings_silos", text = "SILOS", key = "silos" },
+        { id = "settings_vending", text = "VENDING", key = "vending" },
         { id = "settings_control", text = "CONTROL", key = "control" },
     }
 
     local settings_tab_count = #subtabs
-    local settings_button_w = math.floor((panel_w - 18) / settings_tab_count)
+    local btn_gap = 2
+    local settings_button_w = math.floor((panel_w - (settings_tab_count - 1) * btn_gap) / settings_tab_count)
+    local used_w = settings_tab_count * settings_button_w + (settings_tab_count - 1) * btn_gap
+    local tab_start_x = panel_x + math.floor((panel_w - used_w) / 2)
 
     for i, tab in ipairs(subtabs) do
         local active = (settings_subtab == tab.key)
         local target = tab.key
+        local bx = tab_start_x + (i - 1) * (settings_button_w + btn_gap)
         s:element({
             id = tab.id,
             type = "button",
-            rect = { unit = "px", x = panel_x + 6 + (i - 1) * settings_button_w, y = tab_y, w = settings_button_w - 2, h = 20 },
+            rect = { unit = "px", x = bx, y = tab_y, w = settings_button_w, h = 20 },
             props = { text = tab.text },
             style = {
                 bg = active and C.accent or C.panel_light,
@@ -3019,7 +3306,172 @@ function render_settings(surface)
         })
     end
 
+
     local content_y = tab_y + 30
+
+    -- ===== VENDING =====
+    if settings_subtab == "vending" then
+        local vy = content_y + 4
+
+        s:element({
+            id = "vend_warn_label",
+            type = "label",
+            rect = { unit = "px", x = panel_x + 10, y = vy, w = panel_w - 20, h = 28 },
+            props = { text = "Turn on to use Vending Machines as storage option instead of silos." },
+            style = { font_size = 7, color = C.red, align = "left" }
+        })
+        vy = vy + 32
+
+        local vend_active = use_vend_ore_mode
+        s:element({
+            id = "vend_mode_label",
+            type = "label",
+            rect = { unit = "px", x = panel_x + 14, y = vy + 2, w = 190, h = 14 },
+            props = { text = "Use Vending Machines for Ore Storage" },
+            style = { font_size = 9, color = C.text, align = "left" }
+        })
+        s:element({
+            id = "vend_mode_btn",
+            type = "button",
+            rect = { unit = "px", x = panel_x + 212, y = vy, w = 150, h = 18 },
+            props = { text = vend_active and "ON  (Using Vending)" or "OFF (Using Silos)" },
+            style = {
+                bg = vend_active and C.green or C.panel_light,
+                text = vend_active and C.bg or C.text,
+                font_size = 9,
+                gradient = vend_active and "#166534" or "#292929ff",
+                gradient_dir = "vertical"
+            },
+            on_click = function()
+                use_vend_ore_mode = not use_vend_ore_mode
+                save_control_settings()
+                dashboard_render(true)
+            end
+        })
+        vy = vy + 24
+
+        local delay_active = eject_delay_enabled
+        s:element({
+            id = "eject_delay_label",
+            type = "label",
+            rect = { unit = "px", x = panel_x + 14, y = vy + 2, w = 190, h = 14 },
+            props = { text = "Delay Eject After Target Reached" },
+            style = { font_size = 9, color = C.text, align = "left" }
+        })
+        s:element({
+            id = "eject_delay_btn",
+            type = "button",
+            rect = { unit = "px", x = panel_x + 212, y = vy, w = 150, h = 18 },
+            props = { text = delay_active and "ON  (delay before eject)" or "OFF (immediate eject)" },
+            style = {
+                bg = delay_active and C.accent or C.panel_light,
+                text = delay_active and C.bg or C.text,
+                font_size = 9,
+                gradient = delay_active and "#0f4c63" or "#292929ff",
+                gradient_dir = "vertical"
+            },
+            on_click = function()
+                eject_delay_enabled = not eject_delay_enabled
+                save_control_settings()
+                dashboard_render(true)
+            end
+        })
+        vy = vy + 22
+
+        s:element({
+            id = "eject_delay_ticks_label",
+            type = "label",
+            rect = { unit = "px", x = panel_x + 14, y = vy + 2, w = 190, h = 14 },
+            props = { text = "Eject Delay (ticks)" },
+            style = { font_size = 9, color = delay_active and C.text or C.text_muted, align = "left" }
+        })
+        s:element({
+            id = "eject_delay_ticks_input",
+            type = "textinput",
+            rect = { unit = "px", x = panel_x + 212, y = vy, w = 110, h = 20 },
+            props = { value = tostring(eject_delay_ticks), placeholder = "5" },
+            on_change = function(v)
+                local n = math.max(1, math.floor(to_number_or(v, eject_delay_ticks)))
+                eject_delay_ticks = n
+                save_control_settings()
+            end
+        })
+        vy = vy + 26
+
+        s:element({
+            id = "vend_devices_header",
+            type = "label",
+            rect = { unit = "px", x = panel_x + 14, y = vy, w = panel_w - 28, h = 12 },
+            props = { text = "Vending Machine Device Assignments" },
+            style = { font_size = 8, color = C.accent, align = "left" }
+        })
+        vy = vy + 16
+
+        local grouped_roles = current_settings_roles()
+        for i, role in ipairs(grouped_roles) do
+            local def = role_defs[role.index]
+            if def ~= nil then
+                local cache = cached_role_dropdowns[def.key] or { opts = { "Select device..." }, cands = {}, sel = 0 }
+                local options, candidates, selected_idx = cache.opts, cache.cands, cache.sel
+                local row_candidates = candidates
+                settings_dropdown_selected[def.key] = selected_idx
+
+                s:element({
+                    id = "dev_label_" .. def.key,
+                    type = "label",
+                    rect = { unit = "px", x = panel_x + 14, y = vy + 2, w = 125, h = 14 },
+                    props = { text = role.label },
+                    style = { font_size = 8, color = C.text, align = "left" }
+                })
+
+                s:element({
+                    id = "dev_select_" .. def.key,
+                    type = "select",
+                    rect = { unit = "px", x = panel_x + 131, y = vy, w = 300, h = 20 },
+                    props = {
+                        options = table.concat(options, "|"),
+                        selected = settings_dropdown_selected[def.key],
+                        open = settings_dropdown_open[def.key],
+                    },
+                    on_toggle = function()
+                        local opening = settings_dropdown_open[def.key] ~= "true"
+                        if opening then
+                            local devs = device_list_safe()
+                            local opts, cands, sel = build_filtered_device_options(devs, role)
+                            cached_role_dropdowns[def.key] = { opts = opts, cands = cands, sel = sel }
+                        end
+                        settings_dropdown_open[def.key] = opening and "true" or "false"
+                        dashboard_render(true)
+                    end,
+                    on_change = function(optionIndex)
+                        local selected_option = tonumber(optionIndex) or 0
+                        settings_dropdown_selected[def.key] = selected_option
+                        settings_dropdown_open[def.key] = "false"
+
+                        if selected_option == 0 then
+                            role.prefab = 0
+                            role.namehash = 0
+                        else
+                            local picked = row_candidates[selected_option]
+                            if picked ~= nil then
+                                role.prefab = tonumber(picked.prefab_hash) or 0
+                                role.namehash = tonumber(picked.name_hash) or 0
+                            end
+                        end
+
+                        save_role_to_memory(role)
+                        if cached_role_dropdowns[def.key] then
+                            cached_role_dropdowns[def.key].sel = selected_option
+                        end
+                        dashboard_render(true)
+                    end
+                })
+                vy = vy + 22
+                if vy > panel_y + panel_h - 10 then break end
+            end
+        end
+        return
+    end
 
     if settings_subtab ~= "control" then
         local grouped_roles = current_settings_roles()
@@ -3358,6 +3810,9 @@ function serialize()
         global_power_on = global_power_on,
         power_target_all = power_target_all,
         gas_mix_index = gas_mix_index,
+        use_vend_ore_mode = use_vend_ore_mode,
+        eject_delay_enabled = eject_delay_enabled,
+        eject_delay_ticks = eject_delay_ticks,
     }
     local ok, json = pcall(util.json.encode, state)
     if not ok then return nil end
@@ -3385,6 +3840,9 @@ function deserialize(blob)
     if decoded.global_power_on ~= nil then global_power_on = (decoded.global_power_on == true) end
     if decoded.power_target_all ~= nil then power_target_all = (decoded.power_target_all == true) end
     if decoded.gas_mix_index ~= nil then gas_mix_index = clamp(math.floor(to_number_or(decoded.gas_mix_index, 1)), 1, #GAS_MIX_OPTIONS) end
+    if decoded.use_vend_ore_mode ~= nil then use_vend_ore_mode = (decoded.use_vend_ore_mode == true) end
+    if decoded.eject_delay_enabled ~= nil then eject_delay_enabled = (decoded.eject_delay_enabled == true) end
+    if decoded.eject_delay_ticks ~= nil then eject_delay_ticks = math.max(1, math.floor(to_number_or(decoded.eject_delay_ticks, 5))) end
     normalize_settings_subtab()
     sync_selected_recipe()
     log_step("deserialize: applied saved state")
